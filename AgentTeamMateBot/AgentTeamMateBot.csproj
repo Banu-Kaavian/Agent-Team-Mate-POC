@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>a33eb8eb-3617-496c-abfd-1a3873889bb0</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Graph.Communications.Calls" Version="1.2.0.17950" />
+    <PackageReference Include="Microsoft.Graph.Communications.Calls.Media" Version="1.2.0.17950" />
+    <PackageReference Include="Microsoft.Graph.Communications.Core" Version="1.2.0.17950" />
+    <PackageReference Include="Microsoft.Identity.Client" Version="4.88.0" />
+  </ItemGroup>
+
+</Project>
