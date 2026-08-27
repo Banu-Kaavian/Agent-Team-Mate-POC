@@ -1,0 +1,47 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.11/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.11",
+  "version": "1.0.0",
+  "id": "aac3fcb6-1b8d-47ad-ac89-3c1e7fbd3afd",
+  "packageName": "com.smartsoft.agentteammate",
+  "developer": {
+    "name": "Smartsoft International",
+    "websiteUrl": "https://teammate-bot.westus3.cloudapp.azure.com",
+    "privacyUrl": "https://teammate-bot.westus3.cloudapp.azure.com",
+    "termsOfUseUrl": "https://teammate-bot.westus3.cloudapp.azure.com"
+  },
+  "name": {
+    "short": "Agent Team Mate",
+    "full": "Agent Team Mate - Teams Meeting Agent"
+  },
+  "description": {
+    "short": "AI teammate for Microsoft Teams meetings.",
+    "full": "Agent Team Mate is a Microsoft Teams meeting participant for live meeting assistance."
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#FFFFFF",
+  "bots": [
+    {
+      "botId": "aac3fcb6-1b8d-47ad-ac89-3c1e7fbd3afd",
+      "scopes": [
+        "personal",
+        "groupchat",
+        "team"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "supportsCalling": true,
+      "supportsVideo": false
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "teammate-bot.westus3.cloudapp.azure.com"
+  ]
+}
