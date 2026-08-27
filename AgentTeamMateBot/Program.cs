@@ -2,6 +2,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using AgentTeamMateBot.Media;
 
 
 // ============================================================
@@ -76,6 +77,8 @@ var confidentialClient =
         .Build();
 
 
+
+builder.Services.AddSingleton<MeetingMediaHandler>();
 
 var app = builder.Build();
 
@@ -191,53 +194,89 @@ async () =>
 
 
 app.MapPost("/api/calling",
-async (HttpRequest request) =>
+async (
+    HttpRequest request,
+    MeetingMediaHandler mediaHandler) =>
 {
 
     try
     {
 
         var body =
-            await new StreamReader(
-                request.Body)
+            await new StreamReader(request.Body)
             .ReadToEndAsync();
 
 
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine("       TEAMS CALLING EVENT RECEIVED");
+        Console.WriteLine("================================================");
+
+        Console.WriteLine($"Time : {DateTime.UtcNow}");
 
         Console.WriteLine();
-        Console.WriteLine(
-        "================================================");
-
-        Console.WriteLine(
-        "       TEAMS CALLING EVENT RECEIVED");
-
-        Console.WriteLine(
-        $"Time : {DateTime.UtcNow}");
-
-        Console.WriteLine(
-        "================================================");
-
-
+        Console.WriteLine("Event Payload:");
         Console.WriteLine(body);
 
+        Console.WriteLine("================================================");
 
+
+        /*
+         Temporary audio test
+
+         Currently Teams sends only event notifications.
+         Real audio packets will come from
+         Microsoft Graph Media SDK.
+
+         This simulates audio packet arrival.
+        */
+
+        byte[] testAudioPacket = new byte[640];
+
+        mediaHandler.OnAudioReceived(testAudioPacket);
+
+
+
+        Console.WriteLine();
         Console.WriteLine(
-        "================================================");
+            "Webhook processing completed successfully");
+
         Console.WriteLine();
 
 
-        return Results.Ok();
+        return Results.Ok(new
+        {
+            message =
+            "Teams calling event received"
+        });
 
     }
 
     catch(Exception ex)
     {
 
-        Console.WriteLine(
-        $"[CALLBACK ERROR] {ex.Message}");
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine("       CALLBACK ERROR");
+        Console.WriteLine("================================================");
+
+        Console.WriteLine(ex.Message);
+
+        Console.WriteLine("================================================");
+        Console.WriteLine();
 
 
-        return Results.Ok();
+        // Always return 200 to Teams
+        // otherwise Teams retries the notification
+
+        return Results.Ok(new
+        {
+            message =
+            "Callback received with error",
+
+            error =
+            ex.Message
+        });
 
     }
 
