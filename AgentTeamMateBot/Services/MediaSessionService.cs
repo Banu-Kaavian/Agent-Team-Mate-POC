@@ -202,7 +202,7 @@ public class MediaSessionService
                 MediaConfig = new AppHostedMediaConfig
                 {
                     OdataType = "#microsoft.graph.appHostedMediaConfig",
-                    Blob = mediaSession.GetMediaConfiguration().ToString()
+                    Blob = mediaSession.GetMediaConfiguration().ToString(Newtonsoft.Json.Formatting.None)
                 },
                 MeetingInfo = new JoinMeetingIdMeetingInfo
                 {
