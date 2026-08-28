@@ -2,17 +2,50 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+
+    <!-- Application runs on .NET 8 -->
     <TargetFramework>net8.0</TargetFramework>
+
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- Existing User Secrets -->
     <UserSecretsId>a33eb8eb-3617-496c-abfd-1a3873889bb0</UserSecretsId>
   </PropertyGroup>
 
+
   <ItemGroup>
-    <PackageReference Include="Microsoft.Graph.Communications.Calls" Version="1.2.0.17950" />
-    <PackageReference Include="Microsoft.Graph.Communications.Calls.Media" Version="1.2.0.17950" />
-    <PackageReference Include="Microsoft.Graph.Communications.Core" Version="1.2.0.17950" />
-    <PackageReference Include="Microsoft.Identity.Client" Version="4.88.0" />
+
+    <!-- Microsoft Teams Calling SDK -->
+    <PackageReference 
+        Include="Microsoft.Graph.Communications.Calls" 
+        Version="1.2.0.17950" />
+
+
+    <!-- Microsoft Teams Real-Time Media SDK -->
+    <PackageReference 
+        Include="Microsoft.Graph.Communications.Calls.Media" 
+        Version="1.2.0.17950" />
+
+
+    <!-- Microsoft Graph Communications Core -->
+    <PackageReference 
+        Include="Microsoft.Graph.Communications.Core" 
+        Version="1.2.0.17950" />
+
+
+    <!-- Microsoft Entra ID Authentication -->
+    <PackageReference 
+        Include="Microsoft.Identity.Client" 
+        Version="4.88.0" />
+
+
+    <!-- Azure Speech To Text -->
+    <PackageReference 
+        Include="Microsoft.CognitiveServices.Speech" 
+        Version="1.51.0" />
+
   </ItemGroup>
+
 
 </Project>

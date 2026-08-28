@@ -1,8 +1,19 @@
 using Microsoft.CognitiveServices.Speech;
+using Microsoft.CognitiveServices.Speech.Audio;
+
+namespace AgentTeamMateBot.Services;
+
 
 public class SpeechRecognitionService
 {
+
     private readonly IConfiguration _configuration;
+
+    private SpeechRecognizer? _recognizer;
+
+    private PushAudioInputStream? _pushStream;
+
+
 
     public SpeechRecognitionService(
         IConfiguration configuration)
@@ -11,41 +22,38 @@ public class SpeechRecognitionService
     }
 
 
+
     public async Task StartAsync()
     {
+
         Console.WriteLine();
         Console.WriteLine("=================================");
-        Console.WriteLine(" Azure Speech Service Started");
+        Console.WriteLine(" Azure Speech Service Starting ");
         Console.WriteLine("=================================");
 
 
         var key =
             _configuration["Speech:Key"];
 
+
         var region =
             _configuration["Speech:Region"];
 
 
-        if (string.IsNullOrEmpty(key))
-        {
-            Console.WriteLine(
-                "ERROR: Speech Key missing");
 
-            return;
+        if(string.IsNullOrEmpty(key))
+        {
+            throw new Exception(
+                "Speech Key missing");
         }
 
 
-        if (string.IsNullOrEmpty(region))
+        if(string.IsNullOrEmpty(region))
         {
-            Console.WriteLine(
-                "ERROR: Speech Region missing");
-
-            return;
+            throw new Exception(
+                "Speech Region missing");
         }
 
-
-        Console.WriteLine(
-            $"Region : {region}");
 
 
         var speechConfig =
@@ -54,60 +62,124 @@ public class SpeechRecognitionService
                 region);
 
 
+
         speechConfig.SpeechRecognitionLanguage =
             "en-US";
 
 
-        using var recognizer =
+
+        //
+        // Input stream receives
+        // REAL Teams audio packets
+        //
+
+        _pushStream =
+            AudioInputStream.CreatePushStream();
+
+
+
+        var audioConfig =
+            AudioConfig.FromStreamInput(
+                _pushStream);
+
+
+
+        _recognizer =
             new SpeechRecognizer(
-                speechConfig);
+                speechConfig,
+                audioConfig);
 
 
-        recognizer.Recognizing +=
-            (sender, e) =>
+
+        _recognizer.Recognizing +=
+        (sender, e) =>
+        {
+
+            Console.WriteLine(
+                $"[Partial] {e.Result.Text}");
+
+        };
+
+
+
+        _recognizer.Recognized +=
+        (sender, e) =>
+        {
+
+            if(e.Result.Reason ==
+                ResultReason.RecognizedSpeech)
             {
+
+                Console.WriteLine();
                 Console.WriteLine(
-                    $"[Listening] {e.Result.Text}");
-            };
+                "==============================");
 
-
-        recognizer.Recognized +=
-            (sender, e) =>
-            {
-
-                if (!string.IsNullOrEmpty(
-                    e.Result.Text))
-                {
-                    Console.WriteLine();
-                    Console.WriteLine(
-                    "------------------------------");
-
-                    Console.WriteLine(
-                    " FINAL TEXT");
-
-                    Console.WriteLine(
-                    e.Result.Text);
-
-                    Console.WriteLine(
-                    "------------------------------");
-                }
-
-            };
-
-
-        recognizer.Canceled +=
-            (sender, e) =>
-            {
                 Console.WriteLine(
-                    $"Speech Error: {e.ErrorDetails}");
-            };
+                " TRANSCRIPT ");
+
+                Console.WriteLine(
+                e.Result.Text);
+
+                Console.WriteLine(
+                "==============================");
+
+            }
+
+        };
 
 
-        await recognizer
+
+        _recognizer.Canceled +=
+        (sender, e) =>
+        {
+
+            Console.WriteLine(
+                $"Speech cancelled : {e.ErrorDetails}");
+
+        };
+
+
+
+        await _recognizer
             .StartContinuousRecognitionAsync();
 
 
+
         Console.WriteLine(
-            "Speech recognition is listening...");
+            "Azure Speech ready");
+
     }
+
+
+
+
+
+    public async Task ProcessAudioAsync(
+        byte[] audioData)
+    {
+
+
+        if(_pushStream == null)
+        {
+            Console.WriteLine(
+                "Speech stream not initialized");
+
+            return;
+        }
+
+
+
+        Console.WriteLine(
+            $"Sending audio to Speech : {audioData.Length} bytes");
+
+
+
+        _pushStream.Write(audioData);
+
+
+
+        await Task.CompletedTask;
+
+    }
+
 }

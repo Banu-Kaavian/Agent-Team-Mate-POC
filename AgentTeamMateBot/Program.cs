@@ -2,7 +2,9 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+
 using AgentTeamMateBot.Media;
+using AgentTeamMateBot.Services;
 
 
 // ============================================================
@@ -11,19 +13,27 @@ using AgentTeamMateBot.Media;
 
 var builder = WebApplication.CreateBuilder(args);
 
+Console.WriteLine(
+    $"Environment : {builder.Environment.EnvironmentName}");
+
+Console.WriteLine(
+    $"ClientId : {builder.Configuration["Bot:ClientId"]}");
+
+Console.WriteLine(
+    $"TenantId : {builder.Configuration["Bot:TenantId"]}");
+
 
 Console.WriteLine();
 Console.WriteLine("================================================");
 Console.WriteLine("        AGENT TEAM MATE BOT STARTING");
 Console.WriteLine("================================================");
-Console.WriteLine();
 
 
 // ============================================================
 // SERVICES
 // ============================================================
 
-// HTTP client for Microsoft Graph calls
+
 builder.Services.AddHttpClient();
 
 
@@ -31,29 +41,35 @@ builder.Services.AddHttpClient();
 builder.Services.AddSingleton<SpeechRecognitionService>();
 
 
+// Media Service (Real Teams Audio Handler)
+builder.Services.AddSingleton<MediaSessionService>();
+
+
+// Teams Media Handler
+builder.Services.AddSingleton<MeetingMediaHandler>();
+
+
+builder.Services.AddSingleton<AudioHandler>();
+builder.Services.AddSingleton<GraphAuthService>();
 
 // ============================================================
-// BOT CONFIGURATION
+// CONFIGURATION
 // ============================================================
 
 
 var clientId =
     builder.Configuration["Bot:ClientId"]
-    ?? throw new Exception(
-        "Bot:ClientId missing");
+    ?? throw new Exception("Bot:ClientId missing");
 
 
 var tenantId =
     builder.Configuration["Bot:TenantId"]
-    ?? throw new Exception(
-        "Bot:TenantId missing");
+    ?? throw new Exception("Bot:TenantId missing");
 
 
 var clientSecret =
     builder.Configuration["Bot:ClientSecret"]
-    ?? throw new Exception(
-        "Bot:ClientSecret missing");
-
+    ?? throw new Exception("Bot:ClientSecret missing");
 
 
 var callbackUri =
@@ -64,7 +80,7 @@ var callbackUri =
 
 
 // ============================================================
-// MICROSOFT ENTRA AUTH CLIENT
+// MICROSOFT GRAPH AUTH
 // ============================================================
 
 
@@ -78,9 +94,8 @@ var confidentialClient =
 
 
 
-builder.Services.AddSingleton<MeetingMediaHandler>();
-
 var app = builder.Build();
+
 
 
 
@@ -92,28 +107,21 @@ var app = builder.Build();
 app.MapGet("/", () =>
 {
 
-    Console.WriteLine(
-        "[HEALTH] Application check received");
-
-
     return Results.Ok(new
     {
-        Application =
-            "Agent Team Mate",
-
-        Status =
-            "Running",
-
-        Time =
-            DateTime.UtcNow
+        Application = "Agent Team Mate",
+        Status = "Running",
+        Time = DateTime.UtcNow
     });
 
 });
 
 
 
+
+
 // ============================================================
-// GRAPH AUTHENTICATION TEST
+// GRAPH AUTH TEST
 // ============================================================
 
 
@@ -124,11 +132,7 @@ async () =>
     try
     {
 
-        Console.WriteLine(
-            "[AUTH] Requesting Microsoft Graph token");
-
-
-        var result =
+        var token =
             await confidentialClient
             .AcquireTokenForClient(
             new[]
@@ -138,9 +142,8 @@ async () =>
             .ExecuteAsync();
 
 
-
         Console.WriteLine(
-            "[AUTH] Microsoft Graph authentication successful");
+            "[AUTH] Graph authentication successful");
 
 
         return Results.Ok(new
@@ -149,17 +152,13 @@ async () =>
             "Microsoft Graph authentication successful",
 
             Expires =
-            result.ExpiresOn
+            token.ExpiresOn
         });
 
     }
 
     catch(Exception ex)
     {
-
-        Console.WriteLine(
-            $"[AUTH ERROR] {ex.Message}");
-
 
         return Results.BadRequest(new
         {
@@ -176,27 +175,25 @@ async () =>
 
 
 
-// ============================================================
-// TEAMS CALLING WEBHOOK
-// ============================================================
-//
-// Microsoft Teams / Graph sends call events here
-//
-// Current purpose:
-// - Receive participant events
-// - Receive call state changes
-//
-// Later:
-// - Create media session
-// - Receive audio stream
-//
-// ============================================================
 
+
+// ============================================================
+// TEAMS CALLING CALLBACK
+// ============================================================
+//
+// Microsoft Graph sends:
+// - call events
+// - participant events
+// - media state changes
+//
+// Audio DOES NOT come here.
+// Audio comes through Media SDK.
+//
 
 app.MapPost("/api/calling",
 async (
-    HttpRequest request,
-    MeetingMediaHandler mediaHandler) =>
+HttpRequest request,
+MeetingMediaHandler mediaHandler) =>
 {
 
     try
@@ -207,407 +204,174 @@ async (
             .ReadToEndAsync();
 
 
-        Console.WriteLine();
-        Console.WriteLine("================================================");
-        Console.WriteLine("       TEAMS CALLING EVENT RECEIVED");
-        Console.WriteLine("================================================");
-
-        Console.WriteLine($"Time : {DateTime.UtcNow}");
 
         Console.WriteLine();
-        Console.WriteLine("Event Payload:");
+        Console.WriteLine("================================================");
+        Console.WriteLine("       TEAMS EVENT RECEIVED");
+        Console.WriteLine("================================================");
+
+
+        Console.WriteLine(
+            DateTime.UtcNow);
+
+
         Console.WriteLine(body);
 
+
         Console.WriteLine("================================================");
 
 
-        /*
-         Temporary audio test
 
-         Currently Teams sends only event notifications.
-         Real audio packets will come from
-         Microsoft Graph Media SDK.
-
-         This simulates audio packet arrival.
-        */
-
-        byte[] testAudioPacket = new byte[640];
-
-        mediaHandler.OnAudioReceived(testAudioPacket);
+        await mediaHandler.ProcessNotification(body);
 
 
 
-        Console.WriteLine();
-        Console.WriteLine(
-            "Webhook processing completed successfully");
-
-        Console.WriteLine();
-
-
-        return Results.Ok(new
-        {
-            message =
-            "Teams calling event received"
-        });
+        return Results.Ok();
 
     }
 
     catch(Exception ex)
     {
 
-        Console.WriteLine();
-        Console.WriteLine("================================================");
-        Console.WriteLine("       CALLBACK ERROR");
-        Console.WriteLine("================================================");
+        Console.WriteLine(
+            $"CALLBACK ERROR : {ex.Message}");
 
-        Console.WriteLine(ex.Message);
-
-        Console.WriteLine("================================================");
-        Console.WriteLine();
-
-
-        // Always return 200 to Teams
-        // otherwise Teams retries the notification
-
-        return Results.Ok(new
-        {
-            message =
-            "Callback received with error",
-
-            error =
-            ex.Message
-        });
+        return Results.Ok();
 
     }
+
 
 });
 
 
 
 
+
+
 // ============================================================
-// JOIN TEAMS MEETING
+// JOIN MEETING
 // ============================================================
 
 
-app.MapPost(
-"/api/join",
-
+app.MapPost("/api/join",
 async (
 JoinRequest request,
-IHttpClientFactory httpClientFactory) =>
+IHttpClientFactory factory) =>
 {
 
-    try
+
+    var token =
+        await confidentialClient
+        .AcquireTokenForClient(
+        new[]
+        {
+            "https://graph.microsoft.com/.default"
+        })
+        .ExecuteAsync();
+
+
+
+    var payload =
+    new
     {
 
+        callbackUri,
 
-        Console.WriteLine();
-        Console.WriteLine(
-        "================================================");
-
-        Console.WriteLine(
-        "       TEAMS JOIN REQUEST");
-
-        Console.WriteLine(
-        "================================================");
-
-
-
-        if(string.IsNullOrWhiteSpace(request.MeetingId))
+        requestedModalities =
+        new[]
         {
-
-            return Results.BadRequest(
-            new
-            {
-                Message =
-                "meetingId is required"
-            });
-
-        }
+            "audio"
+        },
 
 
-
-        var meetingId =
-            request.MeetingId
-            .Replace(" ","")
-            .Trim();
-
-
-
-        var passcode =
-            request.Passcode?
-            .Trim();
-
-
-
-        Console.WriteLine(
-        $"Meeting ID : {meetingId}");
-
-        Console.WriteLine(
-        $"Callback   : {callbackUri}");
-
-
-
-        // Get Graph token
-
-        var authResult =
-            await confidentialClient
-            .AcquireTokenForClient(
-            new[]
-            {
-                "https://graph.microsoft.com/.default"
-            })
-            .ExecuteAsync();
-
-
-
-        Console.WriteLine(
-        "[GRAPH] Token generated");
-
-
-
-        var payload =
-        new Dictionary<string,object?>
+        mediaConfig =
+        new
         {
+            @odata_type =
+            "#microsoft.graph.serviceHostedMediaConfig"
+        },
 
 
-            ["@odata.type"] =
-            "#microsoft.graph.call",
-
-
-            ["callbackUri"] =
-            callbackUri,
-
-
-            ["requestedModalities"] =
-            new[]
-            {
-                "audio"
-            },
-
-
-            ["mediaConfig"] =
-            new Dictionary<string,string>
-            {
-                ["@odata.type"] =
-                "#microsoft.graph.serviceHostedMediaConfig"
-            },
-
-
-            ["meetingInfo"] =
-            new Dictionary<string,object?>
-            {
-
-                ["@odata.type"] =
-                "#microsoft.graph.joinMeetingIdMeetingInfo",
-
-
-                ["joinMeetingId"] =
-                meetingId,
-
-
-                ["passcode"] =
-                passcode
-
-            },
-
-
-            ["tenantId"] =
-            tenantId
-
-        };
-
-
-
-        var json =
-            JsonSerializer.Serialize(payload);
-
-
-
-        var client =
-            httpClientFactory.CreateClient();
-
-
-
-        using var graphRequest =
-            new HttpRequestMessage(
-                HttpMethod.Post,
-                "https://graph.microsoft.com/v1.0/communications/calls");
-
-
-
-        graphRequest.Headers.Authorization =
-            new AuthenticationHeaderValue(
-                "Bearer",
-                authResult.AccessToken);
-
-
-
-        graphRequest.Content =
-            new StringContent(
-                json,
-                Encoding.UTF8,
-                "application/json");
-
-
-
-        Console.WriteLine(
-        "[GRAPH] Sending join request");
-
-
-
-        var response =
-            await client.SendAsync(graphRequest);
-
-
-
-        var responseBody =
-            await response.Content
-            .ReadAsStringAsync();
-
-
-
-        Console.WriteLine(
-        $"[GRAPH] Status : {(int)response.StatusCode}");
-
-
-
-        if(!response.IsSuccessStatusCode)
-        {
-
-            Console.WriteLine(
-            "[GRAPH] Join failed");
-
-
-            return Results.Json(
-            new
-            {
-
-                Message =
-                "Microsoft Graph join failed",
-
-                Status =
-                response.StatusCode,
-
-                Response =
-                responseBody
-
-            },
-
-            statusCode:
-            (int)response.StatusCode);
-
-        }
-
-
-
-        Console.WriteLine(
-        "[GRAPH] Join accepted");
-
-
-        return Results.Ok(
+        meetingInfo =
         new
         {
 
-            Message =
-            "Teams meeting join request accepted",
+            @odata_type =
+            "#microsoft.graph.joinMeetingIdMeetingInfo",
 
-            Status =
-            (int)response.StatusCode,
+            joinMeetingId =
+            request.MeetingId,
 
-            Response =
-            responseBody
+            passcode =
+            request.Passcode
 
-        });
+        }
 
-
-    }
-
-    catch(Exception ex)
-    {
-
-        Console.WriteLine(
-        $"[JOIN ERROR] {ex.Message}");
-
-
-        return Results.BadRequest(
-        new
-        {
-            Message =
-            "Join failed",
-
-            Error =
-            ex.Message
-        });
-
-    }
-
-});
+    };
 
 
 
-
-// ============================================================
-// AZURE SPEECH TEST
-// ============================================================
+    var client =
+        factory.CreateClient();
 
 
-app.MapGet(
-"/speech-test",
 
-async(SpeechRecognitionService speech)=>
-{
-
-    Console.WriteLine();
-
-    Console.WriteLine(
-    "[SPEECH] Test started");
+    var http =
+        new HttpRequestMessage(
+            HttpMethod.Post,
+            "https://graph.microsoft.com/v1.0/communications/calls");
 
 
-    await speech.StartAsync();
+
+    http.Headers.Authorization =
+        new AuthenticationHeaderValue(
+            "Bearer",
+            token.AccessToken);
+
+
+
+    http.Content =
+        new StringContent(
+            JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json");
+
+
+
+    var response =
+        await client.SendAsync(http);
+
 
 
     return Results.Ok(
     new
     {
-        Message =
-        "Azure Speech started"
+        Status =
+        response.StatusCode,
+
+        Response =
+        await response.Content.ReadAsStringAsync()
     });
+
 
 });
 
 
 
 
-// ============================================================
-// START SERVER
-// ============================================================
-
 
 Console.WriteLine();
-Console.WriteLine(
-"================================================");
+Console.WriteLine("================================================");
+Console.WriteLine(" Agent Team Mate Bot Ready");
+Console.WriteLine($" Callback : {callbackUri}");
+Console.WriteLine("================================================");
 
-Console.WriteLine(
-" Agent Team Mate Bot Ready");
-
-Console.WriteLine(
-$" Callback : {callbackUri}");
-
-Console.WriteLine(
-"================================================");
 
 
 app.Run();
 
 
 
-
-
-// ============================================================
-// REQUEST MODEL
-// ============================================================
 
 
 public record JoinRequest(
