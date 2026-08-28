@@ -9,6 +9,7 @@ using Microsoft.Graph.Communications.Calls.Media;
 using Microsoft.Graph.Communications.Client;
 using Microsoft.Graph.Communications.Common.Telemetry;
 using Microsoft.Graph.Communications.Resources;
+using Microsoft.Graph.Contracts;
 using Microsoft.Graph.Models;
 using Microsoft.Skype.Bots.Media;
 
@@ -112,7 +113,10 @@ public class MediaSessionService
                     clientId,
                     _graphLogger);
 
-                builder.SetAuthentication(clientId, _graphAuthService.CreateTokenProvider());
+#pragma warning disable CS0618
+                builder.SetAuthenticationProvider(
+                    _graphAuthService.CreateAuthenticationProvider(_graphLogger));
+#pragma warning restore CS0618
                 builder.SetNotificationUrl(new Uri(callbackUri));
                 builder.SetServiceBaseUrl(new Uri("https://graph.microsoft.com/v1.0"));
                 builder.SetMediaPlatformSettings(mediaPlatformSettings);
@@ -170,20 +174,41 @@ public class MediaSessionService
             mediaSession = CreateLocalMediaSession();
             var audioBinding = BindAudioSocket(mediaSession);
 
+            var tenantId = _graphAuthService.TenantId.Trim();
+            var normalizedMeetingId = NormalizeMeetingId(meetingId);
+            var normalizedPasscode = string.IsNullOrWhiteSpace(passcode) ? null : passcode.Trim();
+
+            var applicationIdentity = new Identity
+            {
+                Id = _graphAuthService.ClientId,
+                DisplayName = "Agent Team Mate"
+            };
+            applicationIdentity.SetTenantId(tenantId);
+
             var call = new Call
             {
+                OdataType = "#microsoft.graph.call",
                 CallbackUri = _configuration["Bot:CallbackUri"]
                     ?? "https://teammate-bot.westus3.cloudapp.azure.com/api/calling",
-                TenantId = _graphAuthService.TenantId,
+                TenantId = tenantId,
+                Source = new ParticipantInfo
+                {
+                    Identity = new IdentitySet
+                    {
+                        Application = applicationIdentity
+                    }
+                },
                 RequestedModalities = new List<Modality?> { Modality.Audio },
                 MediaConfig = new AppHostedMediaConfig
                 {
+                    OdataType = "#microsoft.graph.appHostedMediaConfig",
                     Blob = mediaSession.GetMediaConfiguration().ToString()
                 },
                 MeetingInfo = new JoinMeetingIdMeetingInfo
                 {
-                    JoinMeetingId = meetingId,
-                    Passcode = passcode
+                    OdataType = "#microsoft.graph.joinMeetingIdMeetingInfo",
+                    JoinMeetingId = normalizedMeetingId,
+                    Passcode = normalizedPasscode
                 }
             };
 
@@ -191,7 +216,8 @@ public class MediaSessionService
             Console.WriteLine("================================================");
             Console.WriteLine(" JOINING TEAMS MEETING WITH APP-HOSTED MEDIA");
             Console.WriteLine("================================================");
-            Console.WriteLine($"Meeting ID : {meetingId}");
+            Console.WriteLine($"Meeting ID : {normalizedMeetingId}");
+            Console.WriteLine($"Tenant ID  : {tenantId}");
 
             var statefulCall = await _client.Calls().AddAsync(call, mediaSession);
             audioBinding.CallId = statefulCall.Id;
@@ -528,6 +554,11 @@ public class MediaSessionService
 
         throw new InvalidOperationException(
             "Media:PublicIpAddress is required when the service FQDN cannot be resolved to a public IPv4 address.");
+    }
+
+    private static string NormalizeMeetingId(string meetingId)
+    {
+        return new string(meetingId.Where(char.IsDigit).ToArray());
     }
 
     private X509Certificate2? LoadCertificate()
