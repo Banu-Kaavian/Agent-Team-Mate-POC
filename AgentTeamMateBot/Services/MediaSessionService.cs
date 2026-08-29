@@ -537,8 +537,7 @@ public class MediaSessionService
             var audioSocketSettings =
                 new AudioSocketSettings
                 {
-                    StreamDirections =
-                        StreamDirection.Recvonly,
+                    StreamDirections = StreamDirection.Sendrecv,
 
                     SupportedAudioFormat =
                         AudioFormat.Pcm16K,
