@@ -288,6 +288,10 @@ public class MediaSessionService
 
         try
         {
+            // ============================================================
+            // CREATE ONE LOCAL MEDIA SESSION
+            // ============================================================
+
             mediaSession =
                 CreateLocalMediaSession();
 
@@ -295,26 +299,26 @@ public class MediaSessionService
                 BindAudioSocket(
                     mediaSession);
 
-            var mediaConfiguration =
-                mediaSession
-                    .GetMediaConfiguration();
+            /*
+             * IMPORTANT:
+             *
+             * DO NOT call:
+             *
+             * mediaSession.GetMediaConfiguration()
+             *
+             * here.
+             *
+             * We pass the ILocalMediaSession directly to
+             * Calls().AddAsync().
+             *
+             * This prevents us from manually generating one
+             * MPMediaSession and then allowing AddAsync() to
+             * generate/bind another MPMediaSession.
+             */
 
-            Console.WriteLine();
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                " GENERATED MEDIA CONFIGURATION");
-
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                mediaConfiguration.ToString(
-                    Newtonsoft.Json.Formatting.Indented));
-
-            Console.WriteLine(
-                "================================================");
+            // ============================================================
+            // MEETING / TENANT DETAILS
+            // ============================================================
 
             var tenantId =
                 _graphAuthService
@@ -331,6 +335,10 @@ public class MediaSessionService
                     ? null
                     : passcode.Trim();
 
+            // ============================================================
+            // APPLICATION IDENTITY
+            // ============================================================
+
             var applicationIdentity =
                 new Identity
                 {
@@ -343,6 +351,17 @@ public class MediaSessionService
 
             applicationIdentity.SetTenantId(
                 tenantId);
+
+            // ============================================================
+            // GRAPH CALL
+            // ============================================================
+            //
+            // IMPORTANT:
+            //
+            // MediaConfig is intentionally NOT populated manually.
+            //
+            // The LocalMediaSession is supplied separately to AddAsync().
+            //
 
             var call =
                 new Call
@@ -374,17 +393,6 @@ public class MediaSessionService
                             Modality.Audio
                         },
 
-                    MediaConfig =
-                        new AppHostedMediaConfig
-                        {
-                            OdataType =
-                                "#microsoft.graph.appHostedMediaConfig",
-
-                            Blob =
-                                mediaConfiguration.ToString(
-                                    Newtonsoft.Json.Formatting.None)
-                        },
-
                     MeetingInfo =
                         new JoinMeetingIdMeetingInfo
                         {
@@ -414,6 +422,16 @@ public class MediaSessionService
 
             Console.WriteLine(
                 $"Tenant ID  : {tenantId}");
+
+            Console.WriteLine(
+                "[MEDIA] LocalMediaSession passed directly to Graph SDK.");
+
+            Console.WriteLine(
+                "[MEDIA] GetMediaConfiguration() is NOT called manually.");
+
+            // ============================================================
+            // JOIN
+            // ============================================================
 
             var statefulCall =
                 await _client
