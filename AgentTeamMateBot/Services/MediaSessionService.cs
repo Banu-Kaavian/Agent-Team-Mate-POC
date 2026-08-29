@@ -174,6 +174,16 @@ public class MediaSessionService
             mediaSession = CreateLocalMediaSession();
             var audioBinding = BindAudioSocket(mediaSession);
 
+            var mediaConfiguration = mediaSession.GetMediaConfiguration();
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" GENERATED MEDIA CONFIGURATION");
+            Console.WriteLine("================================================");
+            Console.WriteLine(
+                mediaConfiguration.ToString(Newtonsoft.Json.Formatting.Indented));
+            Console.WriteLine("================================================");
+
             var tenantId = _graphAuthService.TenantId.Trim();
             var normalizedMeetingId = NormalizeMeetingId(meetingId);
             var normalizedPasscode = string.IsNullOrWhiteSpace(passcode) ? null : passcode.Trim();
@@ -202,7 +212,7 @@ public class MediaSessionService
                 MediaConfig = new AppHostedMediaConfig
                 {
                     OdataType = "#microsoft.graph.appHostedMediaConfig",
-                    Blob = mediaSession.GetMediaConfiguration().ToString(Newtonsoft.Json.Formatting.None)
+                    Blob = mediaConfiguration.ToString(Newtonsoft.Json.Formatting.None)
                 },
                 MeetingInfo = new JoinMeetingIdMeetingInfo
                 {
