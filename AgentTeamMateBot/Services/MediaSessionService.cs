@@ -525,58 +525,45 @@ public class MediaSessionService
     }
 
     private ILocalMediaSession CreateLocalMediaSession()
+{
+    if (_client == null)
     {
-        if (_client == null)
-        {
-            throw new InvalidOperationException(
-                "Communications client is not initialized.");
-        }
-
-        try
-        {
-            var audioSocketSettings =
-                new AudioSocketSettings
-                {
-                    StreamDirections = StreamDirection.Sendrecv,
-
-                    SupportedAudioFormat =
-                        AudioFormat.Pcm16K,
-
-                    ReceiveUnmixedMeetingAudio =
-                        false
-                };
-
-            Console.WriteLine(
-                "[MEDIA] Audio direction : Recvonly");
-
-            var mediaSession =
-                _client.CreateMediaSession(
-                    audioSocketSettings);
-
-            Console.WriteLine(
-                $"[MEDIA] Local media session created : " +
-                $"{mediaSession.MediaSessionId}");
-
-            return mediaSession;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine();
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                " MEDIA SESSION CREATION FAILURE");
-
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex);
-
-            throw;
-        }
+        throw new InvalidOperationException(
+            "Communications client is not initialized.");
     }
+
+    try
+    {
+        var audioSocketSettings = new AudioSocketSettings
+        {
+            StreamDirections = StreamDirection.Sendrecv,
+            SupportedAudioFormat = AudioFormat.Pcm16K,
+            ReceiveUnmixedMeetingAudio = false
+        };
+
+        var videoSocketSettings = new VideoSocketSettings
+        {
+            StreamDirections = StreamDirection.Inactive
+        };
+
+        Console.WriteLine("[MEDIA] Audio direction : Sendrecv");
+        Console.WriteLine("[MEDIA] Video direction : Inactive");
+
+        return _client.CreateMediaSession(
+            audioSocketSettings,
+            videoSocketSettings);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" MEDIA SESSION CREATION FAILURE");
+        Console.WriteLine("================================================");
+        Console.WriteLine(ex.Message);
+        Console.WriteLine(ex);
+        throw;
+    }
+}
 
     private AudioSocketBinding BindAudioSocket(
         ILocalMediaSession mediaSession,
