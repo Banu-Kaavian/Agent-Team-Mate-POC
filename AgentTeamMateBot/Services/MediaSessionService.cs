@@ -62,7 +62,8 @@ public class MediaSessionService
                 Console.WriteLine(" INITIALIZING GRAPH MEDIA PLATFORM");
                 Console.WriteLine("================================================");
 
-                var clientId = _graphAuthService.ClientId;
+                var clientId =
+                    _graphAuthService.ClientId;
 
                 var callbackUri =
                     _configuration["Bot:CallbackUri"]
@@ -91,25 +92,11 @@ public class MediaSessionService
                 var portMax =
                     _configuration.GetValue(
                         "Media:PortRangeMax",
-                        20039);
+                        20999);
 
                 var certificate =
                     LoadCertificate();
 
-                /*
-                 * IMPORTANT:
-                 *
-                 * Match Microsoft's EchoBot media platform configuration.
-                 *
-                 * Do NOT bind the media platform directly to the Azure
-                 * Public IP address.
-                 *
-                 * Azure Public IP is NAT'd to the VM's internal NIC and is
-                 * not physically assigned to a Windows network interface.
-                 *
-                 * IPAddress.Any causes the native media platform to bind
-                 * to the available local network interfaces.
-                 */
                 var mediaBindAddress =
                     IPAddress.Any;
 
@@ -140,24 +127,34 @@ public class MediaSessionService
                         certificate;
 
                     Console.WriteLine(
-                        $"Certificate subject : " +
-                        $"{certificate.Subject}");
+                        $"Certificate subject : {certificate.Subject}");
 
                     Console.WriteLine(
-                        $"Certificate thumbprint : " +
-                        $"{certificate.Thumbprint}");
+                        $"Certificate thumbprint : {certificate.Thumbprint}");
                 }
                 else
                 {
                     throw new InvalidOperationException(
-                        "Media platform certificate is missing. " +
-                        "Set Media:CertificateThumbprint or " +
-                        "Media:CertificatePath, or install an SSL " +
-                        "certificate for the service FQDN in " +
-                        "LocalMachine\\My. The Graph Media SDK " +
-                        "requires an SSL certificate for MTLS " +
-                        "with Teams.");
+                        "Media platform certificate is missing.");
                 }
+
+                // ============================================================
+                // MEDIA SDK LOGGER
+                // ============================================================
+
+                var loggerFactory =
+                    LoggerFactory.Create(
+                        logging =>
+                        {
+                            logging.AddConsole();
+
+                            logging.SetMinimumLevel(
+                                Microsoft.Extensions.Logging.LogLevel.Trace);
+                        });
+
+                var mediaLogger =
+                    new BotMediaLogger(
+                        loggerFactory.CreateLogger<BotMediaLogger>());
 
                 var mediaPlatformSettings =
                     new MediaPlatformSettings
@@ -166,8 +163,15 @@ public class MediaSessionService
                             clientId,
 
                         MediaPlatformInstanceSettings =
-                            instanceSettings
+                            instanceSettings,
+
+                        MediaPlatformLogger =
+                            mediaLogger
                     };
+
+                // ============================================================
+                // GRAPH LOGGER
+                // ============================================================
 
                 _graphLogger =
                     new GraphLogger(
@@ -188,8 +192,7 @@ public class MediaSessionService
 #pragma warning restore CS0618
 
                 builder.SetNotificationUrl(
-                    new Uri(
-                        callbackUri));
+                    new Uri(callbackUri));
 
                 builder.SetServiceBaseUrl(
                     new Uri(
@@ -204,28 +207,29 @@ public class MediaSessionService
                 _client.Calls().OnUpdated +=
                     OnCallsUpdated;
 
-                _initialized = true;
-                _initError = null;
+                _initialized =
+                    true;
+
+                _initError =
+                    null;
 
                 Console.WriteLine(
                     $"Service FQDN     : {serviceFqdn}");
 
                 Console.WriteLine(
-                    $"Media bind IP    : " +
-                    $"{mediaBindAddress} (IPAddress.Any)");
+                    $"Media bind IP    : {mediaBindAddress} (IPAddress.Any)");
 
                 Console.WriteLine(
-                    $"Control port     : " +
-                    $"{internalPort} (internal) / " +
-                    $"{publicPort} (public)");
+                    $"Control port     : {internalPort} (internal) / {publicPort} (public)");
 
                 Console.WriteLine(
-                    $"Media UDP ports  : " +
-                    $"{portMin}-{portMax}");
+                    $"Media UDP ports  : {portMin}-{portMax}");
 
                 Console.WriteLine(
-                    $"Notification URL : " +
-                    $"{callbackUri}");
+                    $"Notification URL : {callbackUri}");
+
+                Console.WriteLine(
+                    "Media SDK logger  : ENABLED");
 
                 Console.WriteLine(
                     "MEDIA PLATFORM INITIALIZED");
@@ -235,8 +239,11 @@ public class MediaSessionService
             }
             catch (Exception ex)
             {
-                _initialized = false;
-                _initError = ex.Message;
+                _initialized =
+                    false;
+
+                _initError =
+                    ex.Message;
 
                 Console.WriteLine();
                 Console.WriteLine(
@@ -253,20 +260,6 @@ public class MediaSessionService
 
                 Console.WriteLine(
                     ex);
-
-                Console.WriteLine();
-
-                Console.WriteLine(
-                    "The bot cannot receive real Teams audio " +
-                    "until MediaPlatform starts.");
-
-                Console.WriteLine(
-                    "Required: Windows Server x64, VC++ x64 runtime, " +
-                    "SSL cert,");
-
-                Console.WriteLine(
-                    "and NSG rules for the media control TCP port " +
-                    "plus the UDP media port range.");
             }
         }
     }
@@ -287,7 +280,7 @@ public class MediaSessionService
             throw new InvalidOperationException(
                 "Media platform is not initialized. " +
                 (_initError ??
-                 "See MEDIA PLATFORM INITIALIZATION FAILURE logs."));
+                 "See initialization logs."));
         }
 
         ILocalMediaSession? mediaSession =
@@ -441,8 +434,7 @@ public class MediaSessionService
                 $"Call ID    : {statefulCall.Id}");
 
             Console.WriteLine(
-                "Media session created and AudioSocket subscribed " +
-                "before call negotiation.");
+                "Media session created and AudioSocket subscribed.");
 
             Console.WriteLine(
                 "================================================");
@@ -479,10 +471,6 @@ public class MediaSessionService
         if (string.IsNullOrWhiteSpace(
                 callId))
         {
-            Console.WriteLine(
-                "[MEDIA] Cannot start media session. " +
-                "Call ID is missing.");
-
             return;
         }
 
@@ -490,8 +478,7 @@ public class MediaSessionService
             _client == null)
         {
             Console.WriteLine(
-                "[MEDIA] Media platform is not initialized. " +
-                "Real AudioSocket audio is unavailable.");
+                "[MEDIA] Media platform is not initialized.");
 
             return;
         }
@@ -517,8 +504,7 @@ public class MediaSessionService
         catch (Exception ex)
         {
             Console.WriteLine(
-                $"[MEDIA] Call {callId} is not in the " +
-                $"CommunicationsClient collection: {ex.Message}");
+                $"[MEDIA] Cannot find call {callId}: {ex.Message}");
         }
 
         if (existingCall?.MediaSession
@@ -537,30 +523,8 @@ public class MediaSessionService
             return;
         }
 
-        Console.WriteLine();
         Console.WriteLine(
-            "================================================");
-
-        Console.WriteLine(
-            " MEDIA SESSION CANNOT BE ATTACHED AFTER THE FACT");
-
-        Console.WriteLine(
-            "================================================");
-
-        Console.WriteLine(
-            $"Call ID : {callId}");
-
-        Console.WriteLine(
-            "AudioSocket must be created before Graph " +
-            "negotiates the call.");
-
-        Console.WriteLine(
-            "Join through POST /api/join so the bot uses " +
-            "AppHostedMediaConfig.");
-
-        Console.WriteLine(
-            "Service-hosted media never delivers PCM bytes " +
-            "to this VM.");
+            "[MEDIA] Media session cannot be attached after call creation.");
     }
 
     public async Task<HttpResponseMessage>
@@ -569,10 +533,6 @@ public class MediaSessionService
     {
         if (_client == null)
         {
-            Console.WriteLine(
-                "[MEDIA] Ignoring calling notification because " +
-                "CommunicationsClient is not initialized.");
-
             return new HttpResponseMessage(
                 HttpStatusCode.ServiceUnavailable);
         }
@@ -585,18 +545,8 @@ public class MediaSessionService
         }
         catch (Exception ex)
         {
-            Console.WriteLine();
             Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                " CALLING NOTIFICATION PROCESSING FAILURE");
-
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                ex.Message);
+                "[MEDIA] Notification processing failure:");
 
             Console.WriteLine(
                 ex);
@@ -649,18 +599,8 @@ public class MediaSessionService
         }
         catch (Exception ex)
         {
-            Console.WriteLine();
             Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                " MEDIA SESSION CREATION FAILURE");
-
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                ex.Message);
+                "[MEDIA] Media session creation failure:");
 
             Console.WriteLine(
                 ex);
@@ -723,8 +663,7 @@ public class MediaSessionService
                     "================================================");
 
                 Console.WriteLine(
-                    $"Call / session : " +
-                    $"{binding.CallId}");
+                    $"Call / session : {binding.CallId}");
 
                 Console.WriteLine(
                     args?.ToString());
@@ -789,8 +728,7 @@ public class MediaSessionService
                  in args.AddedResources)
         {
             Console.WriteLine(
-                $"[CALL] Added {call.Id} " +
-                $"state={call.Resource?.State}");
+                $"[CALL] Added {call.Id} state={call.Resource?.State}");
 
             if (!_calls.ContainsKey(
                     call.Id))
@@ -818,8 +756,7 @@ public class MediaSessionService
                     out var state))
             {
                 _audioBindings.TryRemove(
-                    state.MediaSession
-                        .MediaSessionId,
+                    state.MediaSession.MediaSessionId,
                     out _);
 
                 state.Dispose();
@@ -869,12 +806,6 @@ public class MediaSessionService
                     OnCallEstablishedAsync(
                         _calls[call.Id]);
             }
-            else
-            {
-                _ =
-                    StartMediaSessionAsync(
-                        call.Id);
-            }
         }
     }
 
@@ -900,22 +831,13 @@ public class MediaSessionService
         Console.WriteLine(
             "================================================");
 
-        Console.WriteLine();
-
         Console.WriteLine(
-            "Call ID:");
-
-        Console.WriteLine(
-            state.Call.Id);
-
-        Console.WriteLine();
+            $"Call ID : {state.Call.Id}");
 
         Console.WriteLine(
             state.MediaSession.AudioSocket != null
                 ? "AudioSocket connected"
                 : "AudioSocket missing");
-
-        Console.WriteLine();
 
         try
         {
@@ -924,18 +846,8 @@ public class MediaSessionService
         }
         catch (Exception ex)
         {
-            Console.WriteLine();
             Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                " SPEECH SDK FAILURE");
-
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine(
-                ex.Message);
+                "[SPEECH] Startup failure:");
 
             Console.WriteLine(
                 ex);
@@ -983,7 +895,7 @@ public class MediaSessionService
         catch (Exception ex)
         {
             Console.WriteLine(
-                "[AUDIO SOCKET] Failed to read Teams media buffer: " +
+                "[AUDIO SOCKET] " +
                 ex.Message);
         }
         finally
@@ -997,8 +909,7 @@ public class MediaSessionService
     {
         return new string(
             meetingId
-                .Where(
-                    char.IsDigit)
+                .Where(char.IsDigit)
                 .ToArray());
     }
 
@@ -1020,9 +931,6 @@ public class MediaSessionService
         if (!string.IsNullOrWhiteSpace(
                 path))
         {
-            Console.WriteLine(
-                $"Loading media certificate from {path}");
-
             return new X509Certificate2(
                 path,
                 password);
@@ -1061,17 +969,11 @@ public class MediaSessionService
                 if (certs.Count > 0)
                 {
                     Console.WriteLine(
-                        $"Loaded media certificate from " +
-                        $"{location}\\My");
+                        $"Loaded media certificate from {location}\\My");
 
                     return certs[0];
                 }
             }
-
-            throw new InvalidOperationException(
-                $"Certificate with thumbprint {thumbprint} " +
-                "was not found in LocalMachine\\My " +
-                "or CurrentUser\\My.");
         }
 
         var host =
@@ -1113,8 +1015,7 @@ public class MediaSessionService
                         host))
                 {
                     Console.WriteLine(
-                        $"Loaded media certificate for " +
-                        $"{host} from {location}\\My");
+                        $"Loaded media certificate for {host} from {location}\\My");
 
                     return cert;
                 }
@@ -1203,15 +1104,13 @@ public class MediaSessionService
             if (audioSocket != null &&
                 AudioBinding != null)
             {
-                if (AudioBinding
-                    .AudioReceivedHandler != null)
+                if (AudioBinding.AudioReceivedHandler != null)
                 {
                     audioSocket.AudioMediaReceived -=
                         AudioBinding.AudioReceivedHandler;
                 }
 
-                if (AudioBinding
-                    .MediaFailureHandler != null)
+                if (AudioBinding.MediaFailureHandler != null)
                 {
                     audioSocket.MediaStreamFailure -=
                         AudioBinding.MediaFailureHandler;
