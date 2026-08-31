@@ -1,16 +1,12 @@
 using System.Collections.Concurrent;
 using System.Net;
-using System.Runtime.InteropServices;
-using System.Security.Cryptography.X509Certificates;
 using AgentTeamMateBot.Media;
 using Microsoft.Graph.Communications.Calls;
-using Microsoft.Graph.Communications.Calls.Media;
 using Microsoft.Graph.Communications.Client;
 using Microsoft.Graph.Communications.Common.Telemetry;
 using Microsoft.Graph.Communications.Resources;
 using Microsoft.Graph.Contracts;
 using Microsoft.Graph.Models;
-using Microsoft.Skype.Bots.Media;
 
 namespace AgentTeamMateBot.Services;
 
@@ -18,15 +14,21 @@ public class MediaSessionService
 {
     private readonly IConfiguration _configuration;
     private readonly GraphAuthService _graphAuthService;
+
+    // Keep these dependencies for now so we do not disturb
+    // the rest of the existing project/DI configuration.
     private readonly AudioHandler _audioHandler;
     private readonly SpeechRecognitionService _speechService;
 
-    private readonly ConcurrentDictionary<string, CallMediaState> _calls = new();
-    private readonly ConcurrentDictionary<Guid, AudioSocketBinding> _audioBindings = new();
-    private readonly object _initLock = new();
+    private readonly ConcurrentDictionary<string, ICall> _calls =
+        new();
+
+    private readonly object _initLock =
+        new();
 
     private IGraphLogger? _graphLogger;
     private ICommunicationsClient? _client;
+
     private bool _initialized;
     private string? _initError;
 
@@ -36,15 +38,32 @@ public class MediaSessionService
         AudioHandler audioHandler,
         SpeechRecognitionService speechService)
     {
-        _configuration = configuration;
-        _graphAuthService = graphAuthService;
-        _audioHandler = audioHandler;
-        _speechService = speechService;
+        _configuration =
+            configuration;
+
+        _graphAuthService =
+            graphAuthService;
+
+        _audioHandler =
+            audioHandler;
+
+        _speechService =
+            speechService;
     }
 
-    public ICommunicationsClient? Client => _client;
+    public ICommunicationsClient? Client =>
+        _client;
 
-    public bool IsInitialized => _initialized;
+    public bool IsInitialized =>
+        _initialized;
+
+    // ============================================================
+    // INITIALIZE GRAPH COMMUNICATIONS CLIENT
+    //
+    // IMPORTANT:
+    // This version DOES NOT initialize the app-hosted MediaPlatform.
+    // Microsoft hosts the media for the call.
+    // ============================================================
 
     public void Initialize()
     {
@@ -58,9 +77,14 @@ public class MediaSessionService
             try
             {
                 Console.WriteLine();
-                Console.WriteLine("================================================");
-                Console.WriteLine(" INITIALIZING GRAPH MEDIA PLATFORM");
-                Console.WriteLine("================================================");
+                Console.WriteLine(
+                    "================================================");
+
+                Console.WriteLine(
+                    " INITIALIZING GRAPH COMMUNICATIONS CLIENT");
+
+                Console.WriteLine(
+                    "================================================");
 
                 var clientId =
                     _graphAuthService.ClientId;
@@ -68,106 +92,6 @@ public class MediaSessionService
                 var callbackUri =
                     _configuration["Bot:CallbackUri"]
                     ?? "https://teammate-bot.westus3.cloudapp.azure.com/api/calling";
-
-                var serviceFqdn =
-                    _configuration["Bot:ServiceFqdn"]
-                    ?? _configuration["Media:ServiceFqdn"]
-                    ?? new Uri(callbackUri).Host;
-
-                var internalPort =
-                    _configuration.GetValue(
-                        "Media:InternalPort",
-                        8445);
-
-                var publicPort =
-                    _configuration.GetValue(
-                        "Media:PublicPort",
-                        8445);
-
-                var portMin =
-                    _configuration.GetValue(
-                        "Media:PortRangeMin",
-                        20000);
-
-                var portMax =
-                    _configuration.GetValue(
-                        "Media:PortRangeMax",
-                        20999);
-
-                var certificate =
-                    LoadCertificate();
-
-                var mediaBindAddress =
-                    IPAddress.Any;
-
-                var instanceSettings =
-                    new MediaPlatformInstanceSettings
-                    {
-                        ServiceFqdn =
-                            serviceFqdn,
-
-                        InstancePublicIPAddress =
-                            mediaBindAddress,
-
-                        InstanceInternalPort =
-                            internalPort,
-
-                        InstancePublicPort =
-                            publicPort,
-
-                        MediaPortRange =
-                            new PortRange(
-                                (uint)portMin,
-                                (uint)portMax)
-                    };
-
-                if (certificate != null)
-                {
-                    instanceSettings.Certificate =
-                        certificate;
-
-                    Console.WriteLine(
-                        $"Certificate subject : {certificate.Subject}");
-
-                    Console.WriteLine(
-                        $"Certificate thumbprint : {certificate.Thumbprint}");
-                }
-                else
-                {
-                    throw new InvalidOperationException(
-                        "Media platform certificate is missing.");
-                }
-
-                // ============================================================
-                // MEDIA SDK LOGGER
-                // ============================================================
-
-                var loggerFactory =
-                    LoggerFactory.Create(
-                        logging =>
-                        {
-                            logging.AddConsole();
-
-                            logging.SetMinimumLevel(
-                                Microsoft.Extensions.Logging.LogLevel.Trace);
-                        });
-
-                var mediaLogger =
-                    new BotMediaLogger(
-                        loggerFactory.CreateLogger<BotMediaLogger>());
-
-                var mediaPlatformSettings =
-                    new MediaPlatformSettings
-                    {
-                        ApplicationId =
-                            clientId,
-
-                        MediaPlatformInstanceSettings =
-                            instanceSettings,
-
-                        MediaPlatformLogger =
-                            mediaLogger
-                    };
 
                 // ============================================================
                 // GRAPH LOGGER
@@ -178,6 +102,10 @@ public class MediaSessionService
                         "AgentTeamMateBot",
                         redirectToTrace: true);
 
+                // ============================================================
+                // GRAPH COMMUNICATIONS CLIENT
+                // ============================================================
+
                 var builder =
                     new CommunicationsClientBuilder(
                         "AgentTeamMateBot",
@@ -185,26 +113,54 @@ public class MediaSessionService
                         _graphLogger);
 
 #pragma warning disable CS0618
+
                 builder.SetAuthenticationProvider(
                     _graphAuthService
                         .CreateAuthenticationProvider(
                             _graphLogger));
+
 #pragma warning restore CS0618
 
                 builder.SetNotificationUrl(
-                    new Uri(callbackUri));
+                    new Uri(
+                        callbackUri));
 
                 builder.SetServiceBaseUrl(
                     new Uri(
                         "https://graph.microsoft.com/v1.0"));
 
-                builder.SetMediaPlatformSettings(
-                    mediaPlatformSettings);
+                /*
+                 * IMPORTANT
+                 * ============================================================
+                 *
+                 * We intentionally DO NOT call:
+                 *
+                 * builder.SetMediaPlatformSettings(...)
+                 *
+                 * because this implementation uses:
+                 *
+                 * #microsoft.graph.serviceHostedMediaConfig
+                 *
+                 * Microsoft will host the call media.
+                 *
+                 * Therefore we do NOT require:
+                 *
+                 * - MediaPlatform
+                 * - AudioSocket
+                 * - VideoSocket
+                 * - NativeMedia
+                 * - UDP media session
+                 * - CreateMediaSession()
+                 *
+                 * for the join operation.
+                 */
 
                 _client =
                     builder.Build();
 
-                _client.Calls().OnUpdated +=
+                _client
+                    .Calls()
+                    .OnUpdated +=
                     OnCallsUpdated;
 
                 _initialized =
@@ -214,25 +170,22 @@ public class MediaSessionService
                     null;
 
                 Console.WriteLine(
-                    $"Service FQDN     : {serviceFqdn}");
+                    $"Application ID    : {clientId}");
 
                 Console.WriteLine(
-                    $"Media bind IP    : {mediaBindAddress} (IPAddress.Any)");
+                    $"Notification URL  : {callbackUri}");
 
                 Console.WriteLine(
-                    $"Control port     : {internalPort} (internal) / {publicPort} (public)");
+                    "Media mode        : SERVICE HOSTED");
 
                 Console.WriteLine(
-                    $"Media UDP ports  : {portMin}-{portMax}");
+                    "App MediaPlatform : DISABLED");
 
                 Console.WriteLine(
-                    $"Notification URL : {callbackUri}");
+                    "AudioSocket       : NOT USED");
 
                 Console.WriteLine(
-                    "Media SDK logger  : ENABLED");
-
-                Console.WriteLine(
-                    "MEDIA PLATFORM INITIALIZED");
+                    "GRAPH COMMUNICATIONS CLIENT INITIALIZED");
 
                 Console.WriteLine(
                     "================================================");
@@ -250,7 +203,7 @@ public class MediaSessionService
                     "================================================");
 
                 Console.WriteLine(
-                    " MEDIA PLATFORM INITIALIZATION FAILURE");
+                    " GRAPH CLIENT INITIALIZATION FAILURE");
 
                 Console.WriteLine(
                     "================================================");
@@ -263,6 +216,11 @@ public class MediaSessionService
             }
         }
     }
+
+    // ============================================================
+    // JOIN TEAMS MEETING
+    // SERVICE-HOSTED MEDIA
+    // ============================================================
 
     public async Task<ICall> JoinMeetingAsync(
         string meetingId,
@@ -278,46 +236,25 @@ public class MediaSessionService
             _client == null)
         {
             throw new InvalidOperationException(
-                "Media platform is not initialized. " +
-                (_initError ??
-                 "See initialization logs."));
+                "Graph communications client is not initialized. "
+                + (_initError
+                   ?? "See initialization logs."));
         }
-
-        ILocalMediaSession? mediaSession =
-            null;
 
         try
         {
-            // ============================================================
-            // CREATE ONE LOCAL MEDIA SESSION
-            // ============================================================
+            Console.WriteLine();
+            Console.WriteLine(
+                "================================================");
 
-            mediaSession =
-                CreateLocalMediaSession();
+            Console.WriteLine(
+                "       JOIN MEETING REQUEST RECEIVED");
 
-            var audioBinding =
-                BindAudioSocket(
-                    mediaSession);
-
-            /*
-             * IMPORTANT:
-             *
-             * DO NOT call:
-             *
-             * mediaSession.GetMediaConfiguration()
-             *
-             * here.
-             *
-             * We pass the ILocalMediaSession directly to
-             * Calls().AddAsync().
-             *
-             * This prevents us from manually generating one
-             * MPMediaSession and then allowing AddAsync() to
-             * generate/bind another MPMediaSession.
-             */
+            Console.WriteLine(
+                "================================================");
 
             // ============================================================
-            // MEETING / TENANT DETAILS
+            // NORMALIZE MEETING DETAILS
             // ============================================================
 
             var tenantId =
@@ -334,6 +271,23 @@ public class MediaSessionService
                     passcode)
                     ? null
                     : passcode.Trim();
+
+            if (string.IsNullOrWhiteSpace(
+                    normalizedMeetingId))
+            {
+                throw new ArgumentException(
+                    "Meeting ID is required.",
+                    nameof(meetingId));
+            }
+
+            Console.WriteLine(
+                $"Meeting ID : {normalizedMeetingId}");
+
+            Console.WriteLine(
+                $"Tenant ID  : {tenantId}");
+
+            Console.WriteLine(
+                "Media mode : SERVICE HOSTED");
 
             // ============================================================
             // APPLICATION IDENTITY
@@ -353,15 +307,19 @@ public class MediaSessionService
                 tenantId);
 
             // ============================================================
+            // SERVICE-HOSTED MEDIA CONFIGURATION
+            // ============================================================
+
+            var serviceHostedMediaConfig =
+                new ServiceHostedMediaConfig
+                {
+                    OdataType =
+                        "#microsoft.graph.serviceHostedMediaConfig"
+                };
+
+            // ============================================================
             // GRAPH CALL
             // ============================================================
-            //
-            // IMPORTANT:
-            //
-            // MediaConfig is intentionally NOT populated manually.
-            //
-            // The LocalMediaSession is supplied separately to AddAsync().
-            //
 
             var call =
                 new Call
@@ -393,6 +351,9 @@ public class MediaSessionService
                             Modality.Audio
                         },
 
+                    MediaConfig =
+                        serviceHostedMediaConfig,
+
                     MeetingInfo =
                         new JoinMeetingIdMeetingInfo
                         {
@@ -412,7 +373,7 @@ public class MediaSessionService
                 "================================================");
 
             Console.WriteLine(
-                " JOINING TEAMS MEETING WITH APP-HOSTED MEDIA");
+                " JOINING TEAMS MEETING WITH SERVICE-HOSTED MEDIA");
 
             Console.WriteLine(
                 "================================================");
@@ -424,51 +385,59 @@ public class MediaSessionService
                 $"Tenant ID  : {tenantId}");
 
             Console.WriteLine(
-                "[MEDIA] LocalMediaSession passed directly to Graph SDK.");
+                "[MEDIA] Microsoft hosts the media.");
 
             Console.WriteLine(
-                "[MEDIA] GetMediaConfiguration() is NOT called manually.");
+                "[MEDIA] No LocalMediaSession.");
+
+            Console.WriteLine(
+                "[MEDIA] No AudioSocket.");
+
+            Console.WriteLine(
+                "[MEDIA] No MediaPlatform.");
 
             // ============================================================
-            // JOIN
+            // CREATE CALL
             // ============================================================
 
             var statefulCall =
                 await _client
                     .Calls()
                     .AddAsync(
-                        call,
-                        mediaSession);
-
-            audioBinding.CallId =
-                statefulCall.Id;
+                        call);
 
             TrackCall(
-                statefulCall,
-                mediaSession,
-                audioBinding);
+                statefulCall);
 
             Console.WriteLine(
-                $"Call ID    : {statefulCall.Id}");
+                $"Call ID : {statefulCall.Id}");
 
             Console.WriteLine(
-                "Media session created and AudioSocket subscribed.");
+                $"State   : {statefulCall.Resource?.State}");
 
             Console.WriteLine(
                 "================================================");
+
+            Console.WriteLine();
+            Console.WriteLine(
+                "JOIN REQUEST SENT TO MICROSOFT GRAPH");
+
+            Console.WriteLine(
+                $"Call ID : {statefulCall.Id}");
+
+            Console.WriteLine(
+                $"State   : {statefulCall.Resource?.State}");
 
             return statefulCall;
         }
         catch (Exception ex)
         {
-            mediaSession?.Dispose();
-
             Console.WriteLine();
             Console.WriteLine(
                 "================================================");
 
             Console.WriteLine(
-                " MEDIA SESSION CREATION / JOIN FAILURE");
+                " SERVICE-HOSTED MEETING JOIN FAILURE");
 
             Console.WriteLine(
                 "================================================");
@@ -483,67 +452,55 @@ public class MediaSessionService
         }
     }
 
-    public async Task StartMediaSessionAsync(
+    // ============================================================
+    // EXISTING CALLBACK COMPATIBILITY METHOD
+    //
+    // Your MeetingMediaHandler may still call this method when
+    // a call becomes established.
+    //
+    // In service-hosted mode there is NO AudioSocket to start.
+    // ============================================================
+
+    public Task StartMediaSessionAsync(
         string callId)
     {
         if (string.IsNullOrWhiteSpace(
                 callId))
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        if (!_initialized ||
-            _client == null)
-        {
-            Console.WriteLine(
-                "[MEDIA] Media platform is not initialized.");
-
-            return;
-        }
-
-        if (_calls.TryGetValue(
-                callId,
-                out var state))
-        {
-            await OnCallEstablishedAsync(
-                state);
-
-            return;
-        }
-
-        ICall? existingCall =
-            null;
-
-        try
-        {
-            existingCall =
-                _client.Calls()[callId];
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine(
-                $"[MEDIA] Cannot find call {callId}: {ex.Message}");
-        }
-
-        if (existingCall?.MediaSession
-            is ILocalMediaSession localSession)
-        {
-            TrackCall(
-                existingCall,
-                localSession,
-                BindAudioSocket(
-                    localSession,
-                    callId));
-
-            await OnCallEstablishedAsync(
-                _calls[callId]);
-
-            return;
-        }
+        Console.WriteLine();
+        Console.WriteLine(
+            "================================================");
 
         Console.WriteLine(
-            "[MEDIA] Media session cannot be attached after call creation.");
+            " SERVICE-HOSTED CALL ESTABLISHED");
+
+        Console.WriteLine(
+            "================================================");
+
+        Console.WriteLine(
+            $"Call ID : {callId}");
+
+        Console.WriteLine(
+            "Media   : Hosted by Microsoft");
+
+        Console.WriteLine(
+            "AudioSocket : NOT APPLICABLE");
+
+        Console.WriteLine(
+            "Next step   : recordResponse / playPrompt");
+
+        Console.WriteLine(
+            "================================================");
+
+        return Task.CompletedTask;
     }
+
+    // ============================================================
+    // GRAPH CALLBACK PROCESSING
+    // ============================================================
 
     public async Task<HttpResponseMessage>
         ProcessNotificationAsync(
@@ -564,7 +521,7 @@ public class MediaSessionService
         catch (Exception ex)
         {
             Console.WriteLine(
-                "[MEDIA] Notification processing failure:");
+                "[GRAPH] Notification processing failure:");
 
             Console.WriteLine(
                 ex);
@@ -574,169 +531,25 @@ public class MediaSessionService
         }
     }
 
-    private ILocalMediaSession
-        CreateLocalMediaSession()
-    {
-        if (_client == null)
-        {
-            throw new InvalidOperationException(
-                "Communications client is not initialized.");
-        }
-
-        try
-        {
-            var audioSocketSettings =
-                new AudioSocketSettings
-                {
-                    StreamDirections =
-                        StreamDirection.Sendrecv,
-
-                    SupportedAudioFormat =
-                        AudioFormat.Pcm16K,
-
-                    ReceiveUnmixedMeetingAudio =
-                        false
-                };
-
-            var videoSocketSettings =
-                new VideoSocketSettings
-                {
-                    StreamDirections =
-                        StreamDirection.Inactive
-                };
-
-            Console.WriteLine(
-                "[MEDIA] Audio direction : Sendrecv");
-
-            Console.WriteLine(
-                "[MEDIA] Video direction : Inactive");
-
-            return _client.CreateMediaSession(
-                audioSocketSettings,
-                videoSocketSettings);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine(
-                "[MEDIA] Media session creation failure:");
-
-            Console.WriteLine(
-                ex);
-
-            throw;
-        }
-    }
-
-    private AudioSocketBinding
-        BindAudioSocket(
-            ILocalMediaSession mediaSession,
-            string? callId = null)
-    {
-        if (_audioBindings.TryGetValue(
-                mediaSession.MediaSessionId,
-                out var existing))
-        {
-            if (!string.IsNullOrWhiteSpace(
-                    callId))
-            {
-                existing.CallId =
-                    callId;
-            }
-
-            return existing;
-        }
-
-        var audioSocket =
-            mediaSession.AudioSocket
-            ?? throw new InvalidOperationException(
-                "Media session does not contain an AudioSocket.");
-
-        var binding =
-            new AudioSocketBinding
-            {
-                CallId =
-                    callId
-                    ?? mediaSession
-                        .MediaSessionId
-                        .ToString()
-            };
-
-        binding.AudioReceivedHandler =
-            (_, args) =>
-                OnAudioMediaReceived(
-                    binding.CallId,
-                    args);
-
-        binding.MediaFailureHandler =
-            (_, args) =>
-            {
-                Console.WriteLine();
-                Console.WriteLine(
-                    "================================================");
-
-                Console.WriteLine(
-                    " AUDIO SOCKET FAILURE");
-
-                Console.WriteLine(
-                    "================================================");
-
-                Console.WriteLine(
-                    $"Call / session : {binding.CallId}");
-
-                Console.WriteLine(
-                    args?.ToString());
-            };
-
-        audioSocket.AudioMediaReceived +=
-            binding.AudioReceivedHandler;
-
-        audioSocket.MediaStreamFailure +=
-            binding.MediaFailureHandler;
-
-        _audioBindings[
-            mediaSession.MediaSessionId] =
-            binding;
-
-        Console.WriteLine(
-            "AudioSocket event AudioMediaReceived subscribed.");
-
-        return binding;
-    }
+    // ============================================================
+    // TRACK CALL
+    // ============================================================
 
     private void TrackCall(
-        ICall call,
-        ILocalMediaSession mediaSession,
-        AudioSocketBinding audioBinding)
+        ICall call)
     {
-        audioBinding.CallId =
-            call.Id;
-
-        if (_calls.TryGetValue(
+        if (_calls.TryAdd(
                 call.Id,
-                out var existing))
+                call))
         {
-            existing.AudioBinding =
-                audioBinding;
-
-            return;
+            call.OnUpdated +=
+                OnCallResourceUpdated;
         }
-
-        var state =
-            new CallMediaState(
-                call,
-                mediaSession)
-            {
-                AudioBinding =
-                    audioBinding
-            };
-
-        _calls[
-            call.Id] =
-            state;
-
-        call.OnUpdated +=
-            OnCallResourceUpdated;
     }
+
+    // ============================================================
+    // CALL COLLECTION EVENTS
+    // ============================================================
 
     private void OnCallsUpdated(
         ICallCollection sender,
@@ -748,12 +561,8 @@ public class MediaSessionService
             Console.WriteLine(
                 $"[CALL] Added {call.Id} state={call.Resource?.State}");
 
-            if (!_calls.ContainsKey(
-                    call.Id))
-            {
-                call.OnUpdated +=
-                    OnCallResourceUpdated;
-            }
+            TrackCall(
+                call);
         }
 
         foreach (var call
@@ -771,16 +580,17 @@ public class MediaSessionService
 
             if (_calls.TryRemove(
                     call.Id,
-                    out var state))
+                    out var existing))
             {
-                _audioBindings.TryRemove(
-                    state.MediaSession.MediaSessionId,
-                    out _);
-
-                state.Dispose();
+                existing.OnUpdated -=
+                    OnCallResourceUpdated;
             }
         }
     }
+
+    // ============================================================
+    // INDIVIDUAL CALL UPDATE
+    // ============================================================
 
     private void OnCallResourceUpdated(
         ICall sender,
@@ -789,6 +599,10 @@ public class MediaSessionService
         HandleCallStateChange(
             sender);
     }
+
+    // ============================================================
+    // CALL STATE
+    // ============================================================
 
     private void HandleCallStateChange(
         ICall call)
@@ -802,363 +616,89 @@ public class MediaSessionService
         if (state ==
             CallState.Established)
         {
-            if (_calls.TryGetValue(
-                    call.Id,
-                    out var mediaState))
-            {
-                _ =
-                    OnCallEstablishedAsync(
-                        mediaState);
-            }
-            else if (call.MediaSession
-                     is ILocalMediaSession localSession)
-            {
-                TrackCall(
-                    call,
-                    localSession,
-                    BindAudioSocket(
-                        localSession,
-                        call.Id));
+            Console.WriteLine();
+            Console.WriteLine(
+                "================================================");
 
-                _ =
-                    OnCallEstablishedAsync(
-                        _calls[call.Id]);
+            Console.WriteLine(
+                "     TEAMS CALL ESTABLISHED");
+
+            Console.WriteLine(
+                "================================================");
+
+            Console.WriteLine(
+                $"Call ID : {call.Id}");
+
+            Console.WriteLine(
+                "Media mode : SERVICE HOSTED");
+
+            Console.WriteLine(
+                "Agent Team Mate has joined the meeting.");
+
+            Console.WriteLine(
+                "================================================");
+        }
+
+        if (state ==
+            CallState.Terminated)
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                "================================================");
+
+            Console.WriteLine(
+                "       TEAMS CALL TERMINATED");
+
+            Console.WriteLine(
+                "================================================");
+
+            Console.WriteLine(
+                $"Call ID : {call.Id}");
+
+            var resultInfo =
+                call.Resource?.ResultInfo;
+
+            if (resultInfo != null)
+            {
+                Console.WriteLine(
+                    $"Code    : {resultInfo.Code}");
+
+                Console.WriteLine(
+                    $"Subcode : {resultInfo.Subcode}");
+
+                Console.WriteLine(
+                    $"Message : {resultInfo.Message}");
             }
+
+            Console.WriteLine(
+                "================================================");
         }
     }
 
-    private async Task
-        OnCallEstablishedAsync(
-            CallMediaState state)
-    {
-        if (state.EstablishedHandled)
-        {
-            return;
-        }
-
-        state.EstablishedHandled =
-            true;
-
-        Console.WriteLine();
-        Console.WriteLine(
-            "================================================");
-
-        Console.WriteLine(
-            " MEDIA SESSION STARTED");
-
-        Console.WriteLine(
-            "================================================");
-
-        Console.WriteLine(
-            $"Call ID : {state.Call.Id}");
-
-        Console.WriteLine(
-            state.MediaSession.AudioSocket != null
-                ? "AudioSocket connected"
-                : "AudioSocket missing");
-
-        try
-        {
-            await _speechService
-                .StartAsync();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine(
-                "[SPEECH] Startup failure:");
-
-            Console.WriteLine(
-                ex);
-        }
-    }
-
-    private void OnAudioMediaReceived(
-        string callId,
-        AudioMediaReceivedEventArgs args)
-    {
-        var buffer =
-            args.Buffer;
-
-        if (buffer == null)
-        {
-            return;
-        }
-
-        try
-        {
-            var length =
-                (int)buffer.Length;
-
-            if (length <= 0 ||
-                buffer.Data == IntPtr.Zero)
-            {
-                return;
-            }
-
-            var audioBytes =
-                new byte[length];
-
-            Marshal.Copy(
-                buffer.Data,
-                audioBytes,
-                0,
-                length);
-
-            _audioHandler.ProcessAudio(
-                audioBytes,
-                buffer.AudioFormat,
-                buffer.IsSilence,
-                callId);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine(
-                "[AUDIO SOCKET] " +
-                ex.Message);
-        }
-        finally
-        {
-            buffer.Dispose();
-        }
-    }
+    // ============================================================
+    // MEETING ID NORMALIZER
+    //
+    // Example:
+    //
+    // 245 589 142 346 08
+    //
+    // becomes:
+    //
+    // 24558914234608
+    // ============================================================
 
     private static string NormalizeMeetingId(
         string meetingId)
     {
+        if (string.IsNullOrWhiteSpace(
+                meetingId))
+        {
+            return string.Empty;
+        }
+
         return new string(
             meetingId
                 .Where(char.IsDigit)
                 .ToArray());
-    }
-
-    private X509Certificate2?
-        LoadCertificate()
-    {
-        var path =
-            _configuration[
-                "Media:CertificatePath"];
-
-        var password =
-            _configuration[
-                "Media:CertificatePassword"];
-
-        var thumbprint =
-            _configuration[
-                "Media:CertificateThumbprint"];
-
-        if (!string.IsNullOrWhiteSpace(
-                path))
-        {
-            return new X509Certificate2(
-                path,
-                password);
-        }
-
-        if (!string.IsNullOrWhiteSpace(
-                thumbprint))
-        {
-            thumbprint =
-                thumbprint.Replace(
-                    " ",
-                    string.Empty,
-                    StringComparison.Ordinal);
-
-            foreach (var location
-                     in new[]
-                     {
-                         StoreLocation.LocalMachine,
-                         StoreLocation.CurrentUser
-                     })
-            {
-                using var store =
-                    new X509Store(
-                        StoreName.My,
-                        location);
-
-                store.Open(
-                    OpenFlags.ReadOnly);
-
-                var certs =
-                    store.Certificates.Find(
-                        X509FindType.FindByThumbprint,
-                        thumbprint,
-                        validOnly: false);
-
-                if (certs.Count > 0)
-                {
-                    Console.WriteLine(
-                        $"Loaded media certificate from {location}\\My");
-
-                    return certs[0];
-                }
-            }
-        }
-
-        var host =
-            _configuration[
-                "Bot:ServiceFqdn"]
-            ?? _configuration[
-                "Media:ServiceFqdn"]
-            ?? "teammate-bot.westus3.cloudapp.azure.com";
-
-        return FindCertificateByHost(
-            host);
-    }
-
-    private static X509Certificate2?
-        FindCertificateByHost(
-            string host)
-    {
-        foreach (var location
-                 in new[]
-                 {
-                     StoreLocation.LocalMachine,
-                     StoreLocation.CurrentUser
-                 })
-        {
-            using var store =
-                new X509Store(
-                    StoreName.My,
-                    location);
-
-            store.Open(
-                OpenFlags.ReadOnly);
-
-            foreach (var cert
-                     in store.Certificates)
-            {
-                if (cert.HasPrivateKey &&
-                    CertificateMatchesHost(
-                        cert,
-                        host))
-                {
-                    Console.WriteLine(
-                        $"Loaded media certificate for {host} from {location}\\My");
-
-                    return cert;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static bool CertificateMatchesHost(
-        X509Certificate2 cert,
-        string host)
-    {
-        if (cert.Subject.Contains(
-                host,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        foreach (var extension
-                 in cert.Extensions)
-        {
-            if (extension.Oid?.Value
-                != "2.5.29.17")
-            {
-                continue;
-            }
-
-            var formatted =
-                extension.Format(
-                    true);
-
-            if (formatted.Contains(
-                    host,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private sealed class CallMediaState
-        : IDisposable
-    {
-        public CallMediaState(
-            ICall call,
-            ILocalMediaSession mediaSession)
-        {
-            Call =
-                call;
-
-            MediaSession =
-                mediaSession;
-        }
-
-        public ICall Call
-        {
-            get;
-        }
-
-        public ILocalMediaSession MediaSession
-        {
-            get;
-        }
-
-        public AudioSocketBinding? AudioBinding
-        {
-            get;
-            set;
-        }
-
-        public bool EstablishedHandled
-        {
-            get;
-            set;
-        }
-
-        public void Dispose()
-        {
-            var audioSocket =
-                MediaSession.AudioSocket;
-
-            if (audioSocket != null &&
-                AudioBinding != null)
-            {
-                if (AudioBinding.AudioReceivedHandler != null)
-                {
-                    audioSocket.AudioMediaReceived -=
-                        AudioBinding.AudioReceivedHandler;
-                }
-
-                if (AudioBinding.MediaFailureHandler != null)
-                {
-                    audioSocket.MediaStreamFailure -=
-                        AudioBinding.MediaFailureHandler;
-                }
-            }
-
-            MediaSession.Dispose();
-        }
-    }
-
-    private sealed class AudioSocketBinding
-    {
-        public string CallId
-        {
-            get;
-            set;
-        } = string.Empty;
-
-        public EventHandler<AudioMediaReceivedEventArgs>?
-            AudioReceivedHandler
-        {
-            get;
-            set;
-        }
-
-        public EventHandler<MediaStreamFailureEventArgs>?
-            MediaFailureHandler
-        {
-            get;
-            set;
-        }
     }
 }
