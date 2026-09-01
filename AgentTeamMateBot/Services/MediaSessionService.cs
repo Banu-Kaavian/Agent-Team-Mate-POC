@@ -19,9 +19,10 @@ public class MediaSessionService
     private readonly GraphAuthService _graphAuthService;
     private readonly AudioHandler _audioHandler;
     private readonly SpeechRecognitionService _speechService;
+    private readonly AiResponseService _aiResponseService;
+    private readonly SpeechSynthesisService _speechSynthesisService;
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
-
     private readonly ConcurrentDictionary<string, byte> _recordingStarted = new();
 
     private readonly HttpClient _httpClient = new();
@@ -38,12 +39,16 @@ public class MediaSessionService
         IConfiguration configuration,
         GraphAuthService graphAuthService,
         AudioHandler audioHandler,
-        SpeechRecognitionService speechService)
+        SpeechRecognitionService speechService,
+        AiResponseService aiResponseService,
+        SpeechSynthesisService speechSynthesisService)
     {
         _configuration = configuration;
         _graphAuthService = graphAuthService;
         _audioHandler = audioHandler;
         _speechService = speechService;
+        _aiResponseService = aiResponseService;
+        _speechSynthesisService = speechSynthesisService;
     }
 
     public ICommunicationsClient? Client => _client;
@@ -70,7 +75,8 @@ public class MediaSessionService
                 Console.WriteLine(" INITIALIZING GRAPH COMMUNICATIONS CLIENT");
                 Console.WriteLine("================================================");
 
-                var clientId = _graphAuthService.ClientId;
+                var clientId =
+                    _graphAuthService.ClientId;
 
                 var callbackUri =
                     _configuration["Bot:CallbackUri"]
@@ -90,8 +96,9 @@ public class MediaSessionService
 #pragma warning disable CS0618
 
                 builder.SetAuthenticationProvider(
-                    _graphAuthService.CreateAuthenticationProvider(
-                        _graphLogger));
+                    _graphAuthService
+                        .CreateAuthenticationProvider(
+                            _graphLogger));
 
 #pragma warning restore CS0618
 
@@ -102,11 +109,8 @@ public class MediaSessionService
                     new Uri(
                         "https://graph.microsoft.com/v1.0"));
 
-                // IMPORTANT:
-                // No MediaPlatform initialization.
-                // We are using serviceHostedMediaConfig.
-
-                _client = builder.Build();
+                _client =
+                    builder.Build();
 
                 _client
                     .Calls()
@@ -148,8 +152,12 @@ public class MediaSessionService
                 Console.WriteLine("================================================");
                 Console.WriteLine(" GRAPH CLIENT INITIALIZATION FAILURE");
                 Console.WriteLine("================================================");
-                Console.WriteLine(ex.Message);
-                Console.WriteLine(ex);
+
+                Console.WriteLine(
+                    ex.Message);
+
+                Console.WriteLine(
+                    ex);
             }
         }
     }
@@ -162,12 +170,14 @@ public class MediaSessionService
         string meetingId,
         string? passcode)
     {
-        if (!_initialized || _client == null)
+        if (!_initialized ||
+            _client == null)
         {
             Initialize();
         }
 
-        if (!_initialized || _client == null)
+        if (!_initialized ||
+            _client == null)
         {
             throw new InvalidOperationException(
                 "Graph communications client is not initialized. "
@@ -191,7 +201,8 @@ public class MediaSessionService
                     meetingId);
 
             var normalizedPasscode =
-                string.IsNullOrWhiteSpace(passcode)
+                string.IsNullOrWhiteSpace(
+                    passcode)
                     ? null
                     : passcode.Trim();
 
@@ -212,23 +223,18 @@ public class MediaSessionService
             Console.WriteLine(
                 "Media mode : SERVICE HOSTED");
 
-            // ============================================================
-            // APPLICATION IDENTITY
-            // ============================================================
-
             var applicationIdentity =
                 new Identity
                 {
-                    Id = _graphAuthService.ClientId,
-                    DisplayName = "Agent Team Mate"
+                    Id =
+                        _graphAuthService.ClientId,
+
+                    DisplayName =
+                        "Agent Team Mate"
                 };
 
             applicationIdentity.SetTenantId(
                 tenantId);
-
-            // ============================================================
-            // SERVICE HOSTED MEDIA CONFIG
-            // ============================================================
 
             var serviceHostedMediaConfig =
                 new ServiceHostedMediaConfig
@@ -236,10 +242,6 @@ public class MediaSessionService
                     OdataType =
                         "#microsoft.graph.serviceHostedMediaConfig"
                 };
-
-            // ============================================================
-            // CALL RESOURCE
-            // ============================================================
 
             var call =
                 new Call
@@ -311,10 +313,6 @@ public class MediaSessionService
             Console.WriteLine(
                 "[MEDIA] No MediaPlatform.");
 
-            // ============================================================
-            // CREATE CALL
-            // ============================================================
-
             var statefulCall =
                 await _client
                     .Calls()
@@ -351,8 +349,11 @@ public class MediaSessionService
             Console.WriteLine(" SERVICE-HOSTED MEETING JOIN FAILURE");
             Console.WriteLine("================================================");
 
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex);
+            Console.WriteLine(
+                ex.Message);
+
+            Console.WriteLine(
+                ex);
 
             throw;
         }
@@ -366,13 +367,11 @@ public class MediaSessionService
     public async Task StartMediaSessionAsync(
         string callId)
     {
-        if (string.IsNullOrWhiteSpace(callId))
+        if (string.IsNullOrWhiteSpace(
+                callId))
         {
             return;
         }
-
-        // Teams can send multiple established callbacks.
-        // Only start recordResponse once.
 
         if (!_recordingStarted.TryAdd(
                 callId,
@@ -434,17 +433,23 @@ public class MediaSessionService
             var payload =
                 new
                 {
-                    bargeInAllowed = true,
+                    bargeInAllowed =
+                        true,
 
-                    clientContext = clientContext,
+                    clientContext =
+                        clientContext,
 
-                    maxRecordDurationInSeconds = 15,
+                    maxRecordDurationInSeconds =
+                        15,
 
-                    initialSilenceTimeoutInSeconds = 10,
+                    initialSilenceTimeoutInSeconds =
+                        10,
 
-                    maxSilenceTimeoutInSeconds = 3,
+                    maxSilenceTimeoutInSeconds =
+                        3,
 
-                    playBeep = true,
+                    playBeep =
+                        true,
 
                     stopTones =
                         new[]
@@ -530,13 +535,17 @@ public class MediaSessionService
             Console.WriteLine(" RECORD RESPONSE FAILURE");
             Console.WriteLine("================================================");
 
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex);
+            Console.WriteLine(
+                ex.Message);
+
+            Console.WriteLine(
+                ex);
         }
     }
 
     // ============================================================
-    // DOWNLOAD COMPLETED RECORDING
+    // DOWNLOAD RECORDING
+    // STT → AI → TTS → playPrompt
     // ============================================================
 
     public async Task ProcessCompletedRecordingAsync(
@@ -561,9 +570,6 @@ public class MediaSessionService
                 new HttpRequestMessage(
                     HttpMethod.Get,
                     recordingLocation);
-
-            // Use recordingAccessToken supplied by Graph.
-            // Do not use normal Graph app token here.
 
             request.Headers.Authorization =
                 new AuthenticationHeaderValue(
@@ -634,15 +640,70 @@ public class MediaSessionService
             Console.WriteLine(
                 "================================================");
 
-            // NEXT:
-            //
-            // recognizedText
-            //      ↓
-            // AI
-            //      ↓
+            Console.WriteLine();
+            Console.WriteLine(
+                "Sending recognized speech to Azure OpenAI...");
+
+            var aiResponse =
+                await _aiResponseService
+                    .GetResponseAsync(
+                        recognizedText);
+
+            if (string.IsNullOrWhiteSpace(
+                    aiResponse))
+            {
+                Console.WriteLine();
+                Console.WriteLine(
+                    "[AI] No response received.");
+
+                return;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" AGENT TEAM MATE RESPONSE");
+            Console.WriteLine("================================================");
+
+            Console.WriteLine(
+                aiResponse);
+
+            Console.WriteLine(
+                "================================================");
+
+            // ============================================================
             // TTS
-            //      ↓
-            // playPrompt
+            // ============================================================
+
+            Console.WriteLine();
+            Console.WriteLine(
+                "Generating Agent Team Mate voice...");
+
+            var audioUrl =
+                await _speechSynthesisService
+                    .SynthesizeSpeechAsync(
+                        aiResponse);
+
+            if (string.IsNullOrWhiteSpace(
+                    audioUrl))
+            {
+                Console.WriteLine();
+                Console.WriteLine(
+                    "[TTS] No audio URL generated.");
+
+                return;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(
+                $"Generated audio URL : {audioUrl}");
+
+            // ============================================================
+            // PLAY RESPONSE INSIDE TEAMS
+            // ============================================================
+
+            await PlayPromptAsync(
+                callId,
+                audioUrl);
         }
         catch (Exception ex)
         {
@@ -651,14 +712,151 @@ public class MediaSessionService
             Console.WriteLine(" RECORDING PROCESSING FAILURE");
             Console.WriteLine("================================================");
 
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex);
+            Console.WriteLine(
+                ex.Message);
+
+            Console.WriteLine(
+                ex);
         }
         finally
         {
             _recordingStarted.TryRemove(
                 callId,
                 out _);
+        }
+    }
+
+    // ============================================================
+    // PLAY TTS AUDIO INSIDE TEAMS
+    // ============================================================
+
+    private async Task PlayPromptAsync(
+        string callId,
+        string audioUrl)
+    {
+        try
+        {
+            var token =
+                await _graphAuthService
+                    .GetAccessTokenAsync();
+
+            var url =
+                $"https://graph.microsoft.com/v1.0/communications/calls/{callId}/playPrompt";
+
+            var mediaInfo =
+                new Dictionary<string, object?>
+                {
+                    ["@odata.type"] =
+                        "#microsoft.graph.mediaInfo",
+
+                    ["uri"] =
+                        audioUrl,
+
+                    ["resourceId"] =
+                        Guid.NewGuid()
+                            .ToString()
+                };
+
+            var mediaPrompt =
+                new Dictionary<string, object?>
+                {
+                    ["@odata.type"] =
+                        "#microsoft.graph.mediaPrompt",
+
+                    ["mediaInfo"] =
+                        mediaInfo
+                };
+
+            var payload =
+                new Dictionary<string, object?>
+                {
+                    ["prompts"] =
+                        new object[]
+                        {
+                            mediaPrompt
+                        },
+
+                    ["clientContext"] =
+                        Guid.NewGuid()
+                            .ToString()
+                };
+
+            var json =
+                JsonSerializer.Serialize(
+                    payload);
+
+            using var request =
+                new HttpRequestMessage(
+                    HttpMethod.Post,
+                    url);
+
+            request.Headers.Authorization =
+                new AuthenticationHeaderValue(
+                    "Bearer",
+                    token);
+
+            request.Content =
+                new StringContent(
+                    json,
+                    Encoding.UTF8,
+                    "application/json");
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" PLAYING AI RESPONSE IN TEAMS");
+            Console.WriteLine("================================================");
+
+            Console.WriteLine(
+                $"Audio URL : {audioUrl}");
+
+            var response =
+                await _httpClient
+                    .SendAsync(request);
+
+            var responseBody =
+                await response.Content
+                    .ReadAsStringAsync();
+
+            Console.WriteLine(
+                $"Status : {(int)response.StatusCode} {response.StatusCode}");
+
+            if (!string.IsNullOrWhiteSpace(
+                    responseBody))
+            {
+                Console.WriteLine(
+                    responseBody);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception(
+                    $"playPrompt failed: {(int)response.StatusCode} {responseBody}");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(
+                "playPrompt started successfully.");
+
+            Console.WriteLine(
+                "================================================");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" PLAY PROMPT FAILURE");
+            Console.WriteLine("================================================");
+
+            Console.WriteLine(
+                ex.Message);
+
+            Console.WriteLine(
+                ex);
+
+            Console.WriteLine(
+                "================================================");
+
+            throw;
         }
     }
 
@@ -800,9 +998,6 @@ public class MediaSessionService
 
             Console.WriteLine(
                 "================================================");
-
-            // Do not start recordResponse here.
-            // MeetingMediaHandler handles the established callback.
         }
 
         if (state ==

@@ -17,30 +17,40 @@ Console.WriteLine("================================================");
 // KESTREL - LOCAL HTTP + PUBLIC HTTPS
 // ================================================================
 
-var serviceFqdn = builder.Configuration["Bot:ServiceFqdn"]
+var serviceFqdn =
+    builder.Configuration["Bot:ServiceFqdn"]
     ?? "teammate-bot.westus3.cloudapp.azure.com";
 
 X509Certificate2? httpsCertificate = null;
 
-using (var store = new X509Store(StoreName.My, StoreLocation.LocalMachine))
+using (var store =
+       new X509Store(
+           StoreName.My,
+           StoreLocation.LocalMachine))
 {
     store.Open(OpenFlags.ReadOnly);
 
-    var certificates = store.Certificates.Find(
-        X509FindType.FindBySubjectName,
-        serviceFqdn,
-        validOnly: true);
+    var certificates =
+        store.Certificates.Find(
+            X509FindType.FindBySubjectName,
+            serviceFqdn,
+            validOnly: true);
 
     if (certificates.Count > 0)
     {
-        httpsCertificate = certificates[0];
+        httpsCertificate =
+            certificates[0];
 
-        Console.WriteLine($"HTTPS certificate loaded : {httpsCertificate.Subject}");
-        Console.WriteLine($"HTTPS thumbprint         : {httpsCertificate.Thumbprint}");
+        Console.WriteLine(
+            $"HTTPS certificate loaded : {httpsCertificate.Subject}");
+
+        Console.WriteLine(
+            $"HTTPS thumbprint         : {httpsCertificate.Thumbprint}");
     }
     else
     {
-        Console.WriteLine($"HTTPS certificate not found for {serviceFqdn}");
+        Console.WriteLine(
+            $"HTTPS certificate not found for {serviceFqdn}");
     }
 }
 
@@ -52,10 +62,13 @@ builder.WebHost.ConfigureKestrel(options =>
     // Public HTTPS endpoint
     if (httpsCertificate != null)
     {
-        options.ListenAnyIP(443, listenOptions =>
-        {
-            listenOptions.UseHttps(httpsCertificate);
-        });
+        options.ListenAnyIP(
+            443,
+            listenOptions =>
+            {
+                listenOptions.UseHttps(
+                    httpsCertificate);
+            });
     }
 });
 
@@ -65,19 +78,37 @@ builder.WebHost.ConfigureKestrel(options =>
 
 builder.Services.AddHttpClient();
 
+builder.Services.AddSingleton<SpeechSynthesisService>();
+builder.Services.AddSingleton<AiResponseService>();
 builder.Services.AddSingleton<GraphAuthService>();
 builder.Services.AddSingleton<SpeechRecognitionService>();
 builder.Services.AddSingleton<AudioHandler>();
 builder.Services.AddSingleton<MediaSessionService>();
 builder.Services.AddSingleton<MeetingMediaHandler>();
 
-var callbackUri = builder.Configuration["Bot:CallbackUri"]
+var callbackUri =
+    builder.Configuration["Bot:CallbackUri"]
     ?? "https://teammate-bot.westus3.cloudapp.azure.com/api/calling";
 
 var app = builder.Build();
 
 // ================================================================
-// INITIALIZE GRAPH MEDIA PLATFORM
+// TEMP AUDIO DIRECTORY
+// ================================================================
+
+var audioDirectory =
+    Path.Combine(
+        app.Environment.ContentRootPath,
+        "TempAudio");
+
+Directory.CreateDirectory(
+    audioDirectory);
+
+Console.WriteLine(
+    $"Temp audio directory : {audioDirectory}");
+
+// ================================================================
+// INITIALIZE GRAPH COMMUNICATIONS CLIENT
 // ================================================================
 
 app.Services
@@ -88,37 +119,126 @@ app.Services
 // HEALTH CHECK
 // ================================================================
 
-app.MapGet("/", () => Results.Ok(new
-{
-    Application = "Agent Team Mate",
-    Status = "Running",
-    Time = DateTime.UtcNow
-}));
+app.MapGet(
+    "/",
+    () =>
+        Results.Ok(
+            new
+            {
+                Application = "Agent Team Mate",
+                Status = "Running",
+                Time = DateTime.UtcNow
+            }));
 
 // ================================================================
 // GRAPH AUTH TEST
 // ================================================================
 
-app.MapGet("/auth-test", async (GraphAuthService graphAuth) =>
-{
-    try
+app.MapGet(
+    "/auth-test",
+    async (
+        GraphAuthService graphAuth) =>
     {
-        await graphAuth.GetAccessTokenAsync();
+        try
+        {
+            await graphAuth
+                .GetAccessTokenAsync();
 
-        return Results.Ok(new
+            return Results.Ok(
+                new
+                {
+                    Message =
+                        "Microsoft Graph authentication successful"
+                });
+        }
+        catch (Exception ex)
         {
-            Message = "Microsoft Graph authentication successful"
-        });
-    }
-    catch (Exception ex)
+            return Results.BadRequest(
+                new
+                {
+                    Message =
+                        "Authentication failed",
+
+                    Error =
+                        ex.Message
+                });
+        }
+    });
+
+// ================================================================
+// TEMPORARY AUDIO ENDPOINT FOR GRAPH playPrompt
+// ================================================================
+
+app.MapGet(
+    "/api/audio/{fileName}",
+    (
+        string fileName) =>
     {
-        return Results.BadRequest(new
+        try
         {
-            Message = "Authentication failed",
-            Error = ex.Message
-        });
-    }
-});
+            if (string.IsNullOrWhiteSpace(
+                    fileName))
+            {
+                return Results.BadRequest(
+                    "File name is required.");
+            }
+
+            var safeFileName =
+                Path.GetFileName(
+                    fileName);
+
+            if (!safeFileName.EndsWith(
+                    ".wav",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Results.BadRequest(
+                    "Only WAV files are supported.");
+            }
+
+            var filePath =
+                Path.Combine(
+                    audioDirectory,
+                    safeFileName);
+
+            if (!File.Exists(
+                    filePath))
+            {
+                return Results.NotFound();
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" AUDIO FILE REQUESTED");
+            Console.WriteLine("================================================");
+
+            Console.WriteLine(
+                $"File : {safeFileName}");
+
+            Console.WriteLine(
+                "Serving WAV audio to Microsoft Graph.");
+
+            Console.WriteLine(
+                "================================================");
+
+            return Results.File(
+                filePath,
+                contentType: "audio/wav",
+                enableRangeProcessing: false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" AUDIO ENDPOINT FAILURE");
+            Console.WriteLine("================================================");
+
+            Console.WriteLine(
+                ex.Message);
+
+            return Results.StatusCode(
+                StatusCodes.Status500InternalServerError);
+        }
+    });
 
 // ================================================================
 // MICROSOFT GRAPH CALLING CALLBACK
@@ -136,25 +256,36 @@ app.MapPost(
             Console.WriteLine("================================================");
             Console.WriteLine("       TEAMS EVENT RECEIVED");
             Console.WriteLine("================================================");
-            Console.WriteLine(DateTime.UtcNow);
+
+            Console.WriteLine(
+                DateTime.UtcNow);
 
             var response =
-                await mediaHandler.ProcessNotificationAsync(request);
+                await mediaHandler
+                    .ProcessNotificationAsync(
+                        request);
 
-            var content = response.Content == null
-                ? string.Empty
-                : await response.Content.ReadAsStringAsync();
+            var content =
+                response.Content == null
+                    ? string.Empty
+                    : await response.Content
+                        .ReadAsStringAsync();
 
             return Results.Content(
                 content,
-                response.Content?.Headers.ContentType?.MediaType
+                response.Content?
+                    .Headers
+                    .ContentType?
+                    .MediaType
                     ?? "application/json",
-                statusCode: (int)response.StatusCode);
+                statusCode:
+                    (int)response.StatusCode);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"CALLBACK ERROR : {ex}");
-            
+            Console.WriteLine(
+                $"CALLBACK ERROR : {ex}");
+
             // Graph expects callback acknowledgement.
             return Results.Ok();
         }
@@ -177,23 +308,39 @@ app.MapPost(
             Console.WriteLine("       JOIN MEETING REQUEST RECEIVED");
             Console.WriteLine("================================================");
 
-            Console.WriteLine($"Meeting ID : {request.MeetingId}");
+            Console.WriteLine(
+                $"Meeting ID : {request.MeetingId}");
 
-            var call = await mediaSessionService.JoinMeetingAsync(
-                request.MeetingId,
-                request.Passcode);
+            var call =
+                await mediaSessionService
+                    .JoinMeetingAsync(
+                        request.MeetingId,
+                        request.Passcode);
 
             Console.WriteLine();
-            Console.WriteLine("JOIN REQUEST SENT TO MICROSOFT GRAPH");
-            Console.WriteLine($"Call ID : {call.Id}");
-            Console.WriteLine($"State   : {call.Resource?.State}");
+            Console.WriteLine(
+                "JOIN REQUEST SENT TO MICROSOFT GRAPH");
 
-            return Results.Ok(new
-            {
-                CallId = call.Id,
-                State = call.Resource?.State?.ToString(),
-                Media = "AppHostedMediaConfig"
-            });
+            Console.WriteLine(
+                $"Call ID : {call.Id}");
+
+            Console.WriteLine(
+                $"State   : {call.Resource?.State}");
+
+            return Results.Ok(
+                new
+                {
+                    CallId =
+                        call.Id,
+
+                    State =
+                        call.Resource?
+                            .State?
+                            .ToString(),
+
+                    Media =
+                        "ServiceHostedMediaConfig"
+                });
         }
         catch (Exception ex)
         {
@@ -202,15 +349,18 @@ app.MapPost(
             Console.WriteLine("                 JOIN ERROR");
             Console.WriteLine("================================================");
 
-            Console.WriteLine(ex);
+            Console.WriteLine(
+                ex);
 
-            return Results.BadRequest(new
-            {
-                Message =
-                    "Failed to join meeting with app-hosted media",
+            return Results.BadRequest(
+                new
+                {
+                    Message =
+                        "Failed to join meeting with service-hosted media",
 
-                Error = ex.Message
-            });
+                    Error =
+                        ex.Message
+                });
         }
     });
 
@@ -222,6 +372,7 @@ Console.WriteLine();
 Console.WriteLine("================================================");
 Console.WriteLine(" Agent Team Mate Bot Ready");
 Console.WriteLine($" Callback : {callbackUri}");
+Console.WriteLine(" Media    : SERVICE HOSTED");
 Console.WriteLine("================================================");
 
 app.Run();
