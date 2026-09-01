@@ -161,6 +161,18 @@ public class MeetingMediaHandler
 
                     continue;
                 }
+
+                if (string.Equals(
+                        odataType,
+                        "#microsoft.graph.playPromptOperation",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    await HandlePlayPromptOperationAsync(
+                        callId,
+                        resourceData);
+
+                    continue;
+                }
             }
 
             // ============================================================
@@ -314,6 +326,123 @@ public class MeetingMediaHandler
                 callId,
                 recordingLocation,
                 recordingAccessToken);
+    }
+
+    // ============================================================
+    // HANDLE PLAY PROMPT OPERATION CALLBACK
+    // Restart listening only after playback has fully finished.
+    // ============================================================
+
+    private async Task HandlePlayPromptOperationAsync(
+        string? callId,
+        JsonElement resourceData)
+    {
+        var status =
+            GetString(
+                resourceData,
+                "status");
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" PLAY PROMPT OPERATION EVENT");
+        Console.WriteLine("================================================");
+
+        Console.WriteLine(
+            $"Call ID : {callId ?? "unknown"}");
+
+        Console.WriteLine(
+            $"Status  : {status ?? "unknown"}");
+
+        int? code = null;
+        int? subcode = null;
+        string? message = null;
+
+        if (resourceData.TryGetProperty(
+                "resultInfo",
+                out var resultInfo) &&
+            resultInfo.ValueKind ==
+                JsonValueKind.Object)
+        {
+            code =
+                GetInt(
+                    resultInfo,
+                    "code");
+
+            subcode =
+                GetInt(
+                    resultInfo,
+                    "subcode");
+
+            message =
+                GetString(
+                    resultInfo,
+                    "message");
+
+            Console.WriteLine(
+                $"Result code    : {code}");
+
+            Console.WriteLine(
+                $"Result subcode : {subcode}");
+
+            Console.WriteLine(
+                $"Result message : {message}");
+        }
+
+        if (!string.Equals(
+                status,
+                "completed",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine(
+                "Play prompt operation not completed yet.");
+
+            Console.WriteLine(
+                "================================================");
+
+            return;
+        }
+
+        if (code.HasValue &&
+            code.Value >= 300)
+        {
+            Console.WriteLine(
+                "Play prompt completed with an error. Not starting the next recording.");
+
+            Console.WriteLine(
+                "================================================");
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(
+                callId))
+        {
+            Console.WriteLine(
+                "Call ID missing.");
+
+            Console.WriteLine(
+                "================================================");
+
+            return;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" PLAY PROMPT COMPLETED");
+        Console.WriteLine("================================================");
+
+        Console.WriteLine(
+            $"Call ID : {callId}");
+
+        Console.WriteLine(
+            "Starting next conversation turn...");
+
+        Console.WriteLine(
+            "================================================");
+
+        await _mediaSessionService
+            .StartNextConversationTurnAsync(
+                callId);
     }
 
     // ============================================================
