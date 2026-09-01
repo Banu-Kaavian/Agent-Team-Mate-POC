@@ -18,28 +18,160 @@ public class SpeechRecognitionService
             configuration;
     }
 
+    private readonly object _liveLock = new();
+    private SpeechRecognizer? _liveRecognizer;
+    private PushAudioInputStream? _livePushStream;
+    private bool _liveStarted;
+
     // ============================================================
-    // OLD APP-HOSTED COMPATIBILITY
+    // PHASE 2: CONTINUOUS LIVE PCM FROM AUDIOSOCKET
+    // RecognizeRecordingAsync below is unchanged for service-hosted.
     // ============================================================
 
-    public Task StartAsync()
+    public async Task StartAsync()
     {
-        Console.WriteLine(
-            "[SPEECH] Raw PCM streaming disabled in service-hosted mode.");
+        lock (_liveLock)
+        {
+            if (_liveStarted)
+            {
+                return;
+            }
 
-        return Task.CompletedTask;
+            _liveStarted = true;
+        }
+
+        try
+        {
+            var key =
+                _configuration["Speech:Key"];
+
+            var region =
+                _configuration["Speech:Region"];
+
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                throw new Exception("Speech:Key missing");
+            }
+
+            if (string.IsNullOrWhiteSpace(region))
+            {
+                throw new Exception("Speech:Region missing");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" LIVE AZURE SPEECH STARTING");
+            Console.WriteLine("================================================");
+            Console.WriteLine($"Speech region : {region}");
+            Console.WriteLine("Input         : 16 kHz 16-bit mono PCM push stream");
+            Console.WriteLine("================================================");
+
+            var speechConfig =
+                SpeechConfig.FromSubscription(
+                    key,
+                    region);
+
+            speechConfig.SpeechRecognitionLanguage =
+                "en-US";
+
+            var format =
+                AudioStreamFormat.GetWaveFormatPCM(
+                    SpeechSampleRate,
+                    SpeechBitsPerSample,
+                    SpeechChannels);
+
+            _livePushStream =
+                AudioInputStream.CreatePushStream(
+                    format);
+
+            var audioConfig =
+                AudioConfig.FromStreamInput(
+                    _livePushStream);
+
+            _liveRecognizer =
+                new SpeechRecognizer(
+                    speechConfig,
+                    audioConfig);
+
+            _liveRecognizer.Recognized +=
+                (_, e) =>
+                {
+                    if (e.Result.Reason ==
+                            ResultReason.RecognizedSpeech &&
+                        !string.IsNullOrWhiteSpace(
+                            e.Result.Text))
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("================================================");
+                        Console.WriteLine(" LIVE SPEECH");
+                        Console.WriteLine("================================================");
+                        Console.WriteLine(e.Result.Text);
+                        Console.WriteLine("================================================");
+                    }
+                };
+
+            _liveRecognizer.Canceled +=
+                (_, e) =>
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("================================================");
+                    Console.WriteLine(" LIVE SPEECH SDK FAILURE");
+                    Console.WriteLine("================================================");
+                    Console.WriteLine($"Reason        : {e.Reason}");
+                    Console.WriteLine($"Error code    : {e.ErrorCode}");
+                    Console.WriteLine($"Error details : {e.ErrorDetails}");
+                    Console.WriteLine("================================================");
+                };
+
+            await _liveRecognizer
+                .StartContinuousRecognitionAsync();
+
+            Console.WriteLine(
+                "Live Azure Speech continuous recognition started.");
+        }
+        catch (Exception ex)
+        {
+            lock (_liveLock)
+            {
+                _liveStarted = false;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" LIVE SPEECH SDK FAILURE");
+            Console.WriteLine("================================================");
+            Console.WriteLine(ex.Message);
+            Console.WriteLine(ex);
+            throw;
+        }
     }
 
     public void ProcessAudio(
         byte[] audioData)
     {
-        Console.WriteLine(
-            "[SPEECH] ProcessAudio is not used in service-hosted mode.");
+        if (_livePushStream == null)
+        {
+            return;
+        }
+
+        if (audioData == null ||
+            audioData.Length == 0)
+        {
+            return;
+        }
+
+        _livePushStream.Write(audioData);
     }
 
-    public Task StopAsync()
+    public async Task StopAsync()
     {
-        return Task.CompletedTask;
+        if (_liveRecognizer != null)
+        {
+            await _liveRecognizer
+                .StopContinuousRecognitionAsync();
+        }
+
+        _livePushStream?.Close();
     }
 
     // ============================================================

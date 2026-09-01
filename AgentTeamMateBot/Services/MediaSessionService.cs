@@ -24,6 +24,7 @@ public class MediaSessionService
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
     private readonly ConcurrentDictionary<string, byte> _recordingStarted = new();
+    private readonly ConcurrentDictionary<string, byte> _playbackInProgress = new();
 
     private readonly HttpClient _httpClient = new();
 
@@ -373,6 +374,15 @@ public class MediaSessionService
             return;
         }
 
+        if (_playbackInProgress.ContainsKey(
+                callId))
+        {
+            Console.WriteLine(
+                $"[RECORD] Skipping recordResponse for {callId} because playPrompt is still in progress.");
+
+            return;
+        }
+
         if (!_recordingStarted.TryAdd(
                 callId,
                 0))
@@ -402,6 +412,53 @@ public class MediaSessionService
 
         Console.WriteLine(
             "Speak after the beep.");
+
+        Console.WriteLine(
+            "================================================");
+
+        await StartRecordResponseAsync(
+            callId);
+    }
+
+    // ============================================================
+    // NEXT CONVERSATION TURN
+    // Called only after playPrompt has fully completed.
+    // _recordingStarted was cleared in ProcessCompletedRecordingAsync.
+    // ============================================================
+
+    public async Task StartNextConversationTurnAsync(
+        string callId)
+    {
+        if (string.IsNullOrWhiteSpace(
+                callId))
+        {
+            return;
+        }
+
+        _playbackInProgress.TryRemove(
+            callId,
+            out _);
+
+        if (!_recordingStarted.TryAdd(
+                callId,
+                0))
+        {
+            Console.WriteLine(
+                $"[RECORD] recordResponse already started for {callId}");
+
+            return;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" NEXT CONVERSATION TURN");
+        Console.WriteLine("================================================");
+
+        Console.WriteLine(
+            $"Call ID : {callId}");
+
+        Console.WriteLine(
+            "Listening for user...");
 
         Console.WriteLine(
             "================================================");
@@ -647,6 +704,7 @@ public class MediaSessionService
             var aiResponse =
                 await _aiResponseService
                     .GetResponseAsync(
+                        callId,
                         recognizedText);
 
             if (string.IsNullOrWhiteSpace(
@@ -839,6 +897,10 @@ public class MediaSessionService
 
             Console.WriteLine(
                 "================================================");
+
+            _playbackInProgress.TryAdd(
+                callId,
+                0);
         }
         catch (Exception ex)
         {
@@ -944,6 +1006,13 @@ public class MediaSessionService
                 call.Id,
                 out _);
 
+            _playbackInProgress.TryRemove(
+                call.Id,
+                out _);
+
+            _aiResponseService.ClearConversation(
+                call.Id);
+
             if (_calls.TryRemove(
                     call.Id,
                     out var existing))
@@ -1029,6 +1098,13 @@ public class MediaSessionService
             _recordingStarted.TryRemove(
                 call.Id,
                 out _);
+
+            _playbackInProgress.TryRemove(
+                call.Id,
+                out _);
+
+            _aiResponseService.ClearConversation(
+                call.Id);
 
             Console.WriteLine(
                 "================================================");

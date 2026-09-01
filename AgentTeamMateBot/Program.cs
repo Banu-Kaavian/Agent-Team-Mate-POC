@@ -80,10 +80,12 @@ builder.Services.AddHttpClient();
 
 builder.Services.AddSingleton<SpeechSynthesisService>();
 builder.Services.AddSingleton<AiResponseService>();
+builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
 builder.Services.AddSingleton<GraphAuthService>();
 builder.Services.AddSingleton<SpeechRecognitionService>();
 builder.Services.AddSingleton<AudioHandler>();
 builder.Services.AddSingleton<MediaSessionService>();
+builder.Services.AddSingleton<AppHostedMediaService>();
 builder.Services.AddSingleton<MeetingMediaHandler>();
 
 var callbackUri =
@@ -114,6 +116,10 @@ Console.WriteLine(
 app.Services
     .GetRequiredService<MediaSessionService>()
     .Initialize();
+
+app.Services
+    .GetRequiredService<AppHostedMediaService>()
+    .TryInitialize();
 
 // ================================================================
 // HEALTH CHECK
@@ -365,6 +371,72 @@ app.MapPost(
     });
 
 // ================================================================
+// PHASE 2: JOIN WITH APPLICATION-HOSTED MEDIA
+// ================================================================
+
+app.MapPost(
+    "/api/join-apphosted",
+    async (
+        JoinRequest request,
+        AppHostedMediaService appHostedMediaService) =>
+    {
+        try
+        {
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine("  APP-HOSTED JOIN MEETING REQUEST RECEIVED");
+            Console.WriteLine("================================================");
+
+            Console.WriteLine(
+                $"Meeting ID : {request.MeetingId}");
+
+            var call =
+                await appHostedMediaService
+                    .JoinMeetingAsync(
+                        request.MeetingId,
+                        request.Passcode);
+
+            return Results.Ok(
+                new
+                {
+                    CallId =
+                        call.Id,
+
+                    State =
+                        call.Resource?
+                            .State?
+                            .ToString(),
+
+                    Media =
+                        "AppHostedMediaConfig",
+
+                    Listening =
+                        "Continuous AudioSocket.AudioMediaReceived"
+                });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine("           APP-HOSTED JOIN ERROR");
+            Console.WriteLine("================================================");
+
+            Console.WriteLine(
+                ex);
+
+            return Results.BadRequest(
+                new
+                {
+                    Message =
+                        "Failed to join meeting with application-hosted media. Continuous audio is NOT proven.",
+
+                    Error =
+                        ex.Message
+                });
+        }
+    });
+
+// ================================================================
 // START APPLICATION
 // ================================================================
 
@@ -372,7 +444,8 @@ Console.WriteLine();
 Console.WriteLine("================================================");
 Console.WriteLine(" Agent Team Mate Bot Ready");
 Console.WriteLine($" Callback : {callbackUri}");
-Console.WriteLine(" Media    : SERVICE HOSTED");
+Console.WriteLine(" Media    : SERVICE HOSTED  POST /api/join");
+Console.WriteLine(" Phase 2  : APP HOSTED      POST /api/join-apphosted");
 Console.WriteLine("================================================");
 
 app.Run();
