@@ -7,12 +7,17 @@ namespace AgentTeamMateBot.Media;
 public class MeetingMediaHandler
 {
     private readonly MediaSessionService _mediaSessionService;
+    private readonly AppHostedMediaService _appHostedMediaService;
 
     public MeetingMediaHandler(
-        MediaSessionService mediaSessionService)
+        MediaSessionService mediaSessionService,
+        AppHostedMediaService appHostedMediaService)
     {
         _mediaSessionService =
             mediaSessionService;
+
+        _appHostedMediaService =
+            appHostedMediaService;
     }
 
     public async Task<HttpResponseMessage>
@@ -58,6 +63,25 @@ public class MeetingMediaHandler
                 await _mediaSessionService
                     .ProcessNotificationAsync(
                         requestMessage);
+
+            if (_appHostedMediaService.IsInitialized)
+            {
+                using var appHostedRequest =
+                    ToHttpRequestMessage(
+                        request,
+                        body);
+
+                var appHostedResponse =
+                    await _appHostedMediaService
+                        .ProcessNotificationAsync(
+                            appHostedRequest);
+
+                if ((int)appHostedResponse.StatusCode >= 200 &&
+                    (int)appHostedResponse.StatusCode < 300)
+                {
+                    sdkResponse = appHostedResponse;
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -190,6 +214,73 @@ public class MeetingMediaHandler
 
                 if (string.Equals(
                         callState,
+                        "establishing",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(
+                        callState,
+                        "established",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(
+                        callState,
+                        "terminated",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        "================================================");
+                    Console.WriteLine(
+                        " CALL STATE");
+                    Console.WriteLine(
+                        "================================================");
+                    Console.WriteLine(
+                        $"Call ID : {callId ?? "unknown"}");
+                    Console.WriteLine(
+                        $"State   : {callState}");
+
+                    if (resourceData.TryGetProperty(
+                            "resultInfo",
+                            out var callResultInfo) &&
+                        callResultInfo.ValueKind ==
+                            JsonValueKind.Object)
+                    {
+                        var code =
+                            GetInt(
+                                callResultInfo,
+                                "code");
+
+                        var subcode =
+                            GetInt(
+                                callResultInfo,
+                                "subcode");
+
+                        var message =
+                            GetString(
+                                callResultInfo,
+                                "message");
+
+                        Console.WriteLine(
+                            $"resultInfo.code    : {code}");
+                        Console.WriteLine(
+                            $"resultInfo.subcode : {subcode}");
+                        Console.WriteLine(
+                            $"resultInfo.message : {message}");
+
+                        if (subcode == 1203002)
+                        {
+                            Console.WriteLine();
+                            Console.WriteLine(
+                                "BLOCKED: Graph media negotiation failed (1203002).");
+                            Console.WriteLine(
+                                "Continuous audio is NOT proven.");
+                        }
+                    }
+
+                    Console.WriteLine(
+                        "================================================");
+                }
+
+                if (string.Equals(
+                        callState,
                         "established",
                         StringComparison.OrdinalIgnoreCase) &&
                     !string.IsNullOrWhiteSpace(
@@ -198,6 +289,15 @@ public class MeetingMediaHandler
                     Console.WriteLine();
                     Console.WriteLine(
                         $"Call established : {callId}");
+
+                    if (_appHostedMediaService.IsAppHostedCall(
+                            callId))
+                    {
+                        Console.WriteLine(
+                            "[APP-HOSTED] Skipping recordResponse. Live AudioSocket listening is active.");
+
+                        continue;
+                    }
 
                     await _mediaSessionService
                         .StartMediaSessionAsync(
@@ -291,6 +391,15 @@ public class MeetingMediaHandler
         {
             Console.WriteLine(
                 "Call ID missing.");
+
+            return;
+        }
+
+        if (_appHostedMediaService.IsAppHostedCall(
+                callId))
+        {
+            Console.WriteLine(
+                "[APP-HOSTED] Ignoring recordOperation. Continuous AudioSocket is the Phase 2 audio path.");
 
             return;
         }
@@ -419,6 +528,18 @@ public class MeetingMediaHandler
         {
             Console.WriteLine(
                 "Call ID missing.");
+
+            Console.WriteLine(
+                "================================================");
+
+            return;
+        }
+
+        if (_appHostedMediaService.IsAppHostedCall(
+                callId))
+        {
+            Console.WriteLine(
+                "[APP-HOSTED] Ignoring playPromptOperation. Phase 2 Step 1 does not play TTS.");
 
             Console.WriteLine(
                 "================================================");

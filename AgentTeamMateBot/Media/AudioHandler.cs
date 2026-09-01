@@ -7,8 +7,8 @@ public class AudioHandler
 {
     private readonly SpeechRecognitionService _speechService;
     private long _packetCount;
+    private long _livePacketCount;
     private bool _formatLogged;
-    private bool _speechSendLogged;
 
     public AudioHandler(SpeechRecognitionService speechService)
     {
@@ -19,7 +19,8 @@ public class AudioHandler
         byte[] data,
         AudioFormat audioFormat,
         bool isSilence,
-        string callId)
+        string callId,
+        long timestamp = 0)
     {
         if (data == null || data.Length == 0)
         {
@@ -30,27 +31,23 @@ public class AudioHandler
         LogFormatOnce(audioFormat, data.Length);
 
         var pcm16kMono = ConvertToSpeechPcm(data, audioFormat);
-        var packetNumber = Interlocked.Increment(ref _packetCount);
+        Interlocked.Increment(ref _packetCount);
 
-        if (!isSilence && (packetNumber == 1 || packetNumber % 50 == 0))
+        if (!isSilence)
         {
-            Console.WriteLine();
-            Console.WriteLine("================================================");
-            Console.WriteLine("REAL TEAMS AUDIO RECEIVED");
-            Console.WriteLine("================================================");
-            Console.WriteLine($"Call ID : {callId}");
-            Console.WriteLine("Bytes:");
-            Console.WriteLine(data.Length);
-            Console.WriteLine($"Format  : {audioFormat}");
-            Console.WriteLine($"PCM 16 kHz mono bytes : {pcm16kMono.Length}");
-            Console.WriteLine();
-            Console.WriteLine("Sending audio to Azure Speech...");
-            _speechSendLogged = true;
-        }
-        else if (!_speechSendLogged && !isSilence)
-        {
-            Console.WriteLine("Sending audio to Azure Speech...");
-            _speechSendLogged = true;
+            var livePacket = Interlocked.Increment(ref _livePacketCount);
+            if (livePacket == 1 || livePacket % 50 == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("================================================");
+                Console.WriteLine(" LIVE TEAMS AUDIO RECEIVED");
+                Console.WriteLine("================================================");
+                Console.WriteLine($"Call ID    : {callId}");
+                Console.WriteLine($"Bytes      : {data.Length}");
+                Console.WriteLine($"Timestamp  : {timestamp}");
+                Console.WriteLine($"Format     : {audioFormat}");
+                Console.WriteLine("================================================");
+            }
         }
 
         _speechService.ProcessAudio(pcm16kMono);
