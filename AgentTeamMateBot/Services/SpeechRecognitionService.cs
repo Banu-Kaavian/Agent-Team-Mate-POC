@@ -6,155 +6,237 @@ namespace AgentTeamMateBot.Services;
 public class SpeechRecognitionService
 {
     private readonly IConfiguration _configuration;
-    private readonly object _startLock = new();
-
-    private SpeechRecognizer? _recognizer;
-    private PushAudioInputStream? _pushStream;
-    private bool _started;
 
     public const int SpeechSampleRate = 16000;
     public const int SpeechBitsPerSample = 16;
     public const int SpeechChannels = 1;
 
-    public SpeechRecognitionService(IConfiguration configuration)
+    public SpeechRecognitionService(
+        IConfiguration configuration)
     {
-        _configuration = configuration;
+        _configuration =
+            configuration;
     }
 
-    public async Task StartAsync()
-    {
-        lock (_startLock)
-        {
-            if (_started)
-            {
-                return;
-            }
+    // ============================================================
+    // OLD APP-HOSTED COMPATIBILITY
+    // ============================================================
 
-            _started = true;
+    public Task StartAsync()
+    {
+        Console.WriteLine(
+            "[SPEECH] Raw PCM streaming disabled in service-hosted mode.");
+
+        return Task.CompletedTask;
+    }
+
+    public void ProcessAudio(
+        byte[] audioData)
+    {
+        Console.WriteLine(
+            "[SPEECH] ProcessAudio is not used in service-hosted mode.");
+    }
+
+    public Task StopAsync()
+    {
+        return Task.CompletedTask;
+    }
+
+    // ============================================================
+    // RECOGNIZE recordResponse AUDIO
+    // ============================================================
+
+    public async Task<string?> RecognizeRecordingAsync(
+        byte[] recordingBytes)
+    {
+        if (recordingBytes == null ||
+            recordingBytes.Length == 0)
+        {
+            Console.WriteLine(
+                "[SPEECH] Recording is empty.");
+
+            return null;
         }
+
+        var key =
+            _configuration["Speech:Key"];
+
+        var region =
+            _configuration["Speech:Region"];
+
+        if (string.IsNullOrWhiteSpace(
+                key))
+        {
+            throw new Exception(
+                "Speech:Key missing");
+        }
+
+        if (string.IsNullOrWhiteSpace(
+                region))
+        {
+            throw new Exception(
+                "Speech:Region missing");
+        }
+
+        var tempFile =
+            Path.Combine(
+                Path.GetTempPath(),
+                $"agent-teammate-{Guid.NewGuid():N}.wav");
 
         try
         {
+            await File.WriteAllBytesAsync(
+                tempFile,
+                recordingBytes);
+
             Console.WriteLine();
-            Console.WriteLine("=================================");
-            Console.WriteLine(" Azure Speech Service Starting ");
-            Console.WriteLine("=================================");
+            Console.WriteLine("================================================");
+            Console.WriteLine(" AZURE SPEECH RECOGNITION");
+            Console.WriteLine("================================================");
 
-            var key = _configuration["Speech:Key"];
-            var region = _configuration["Speech:Region"];
+            Console.WriteLine(
+                $"Audio bytes   : {recordingBytes.Length}");
 
-            if (string.IsNullOrEmpty(key))
-            {
-                throw new Exception("Speech Key missing");
-            }
+            Console.WriteLine(
+                $"Speech region : {region}");
 
-            if (string.IsNullOrEmpty(region))
-            {
-                throw new Exception("Speech Region missing");
-            }
+            var speechConfig =
+                SpeechConfig.FromSubscription(
+                    key,
+                    region);
 
-            var speechConfig = SpeechConfig.FromSubscription(key, region);
-            speechConfig.SpeechRecognitionLanguage = "en-US";
+            speechConfig.SpeechRecognitionLanguage =
+                "en-US";
 
-            var format = AudioStreamFormat.GetWaveFormatPCM(
-                SpeechSampleRate,
-                SpeechBitsPerSample,
-                SpeechChannels);
+            using var audioConfig =
+                AudioConfig.FromWavFileInput(
+                    tempFile);
 
-            _pushStream = AudioInputStream.CreatePushStream(format);
+            using var recognizer =
+                new SpeechRecognizer(
+                    speechConfig,
+                    audioConfig);
 
-            var audioConfig = AudioConfig.FromStreamInput(_pushStream);
+            Console.WriteLine(
+                "Recognizing speech...");
 
-            _recognizer = new SpeechRecognizer(speechConfig, audioConfig);
+            var result =
+                await recognizer
+                    .RecognizeOnceAsync();
 
-            _recognizer.Recognizing += (_, e) =>
-            {
-                if (!string.IsNullOrWhiteSpace(e.Result.Text))
-                {
-                    Console.WriteLine($"[Partial] {e.Result.Text}");
-                }
-            };
+            // ============================================================
+            // SUCCESS
+            // ============================================================
 
-            _recognizer.Recognized += (_, e) =>
-            {
-                if (e.Result.Reason == ResultReason.RecognizedSpeech &&
-                    !string.IsNullOrWhiteSpace(e.Result.Text))
-                {
-                    Console.WriteLine();
-                    Console.WriteLine("================================================");
-                    Console.WriteLine("TRANSCRIPT");
-                    Console.WriteLine("================================================");
-                    Console.WriteLine();
-                    Console.WriteLine(e.Result.Text);
-                    Console.WriteLine();
-                    Console.WriteLine("================================================");
-                }
-                else if (e.Result.Reason == ResultReason.NoMatch)
-                {
-                    Console.WriteLine("[Speech] NoMatch for this audio segment");
-                }
-            };
-
-            _recognizer.Canceled += (_, e) =>
+            if (result.Reason ==
+                ResultReason.RecognizedSpeech)
             {
                 Console.WriteLine();
                 Console.WriteLine("================================================");
-                Console.WriteLine(" SPEECH SDK FAILURE");
+                Console.WriteLine(" SPEECH RECOGNIZED");
                 Console.WriteLine("================================================");
-                Console.WriteLine($"Reason        : {e.Reason}");
-                Console.WriteLine($"Error code    : {e.ErrorCode}");
-                Console.WriteLine($"Error details : {e.ErrorDetails}");
-            };
 
-            _recognizer.SessionStarted += (_, _) =>
+                Console.WriteLine(
+                    result.Text);
+
+                Console.WriteLine(
+                    "================================================");
+
+                return result.Text;
+            }
+
+            // ============================================================
+            // NO MATCH
+            // ============================================================
+
+            if (result.Reason ==
+                ResultReason.NoMatch)
             {
-                Console.WriteLine("Azure Speech continuous recognition session started");
-            };
+                Console.WriteLine();
+                Console.WriteLine("================================================");
+                Console.WriteLine(" SPEECH NOT RECOGNIZED");
+                Console.WriteLine("================================================");
 
-            await _recognizer.StartContinuousRecognitionAsync();
+                var noMatchDetails =
+                    NoMatchDetails.FromResult(
+                        result);
 
-            Console.WriteLine("Azure Speech ready (16 kHz 16-bit mono PCM push stream)");
+                Console.WriteLine(
+                    $"Reason : {noMatchDetails.Reason}");
+
+                Console.WriteLine(
+                    "================================================");
+
+                return null;
+            }
+
+            // ============================================================
+            // CANCELLED
+            // ============================================================
+
+            if (result.Reason ==
+                ResultReason.Canceled)
+            {
+                var cancellation =
+                    CancellationDetails.FromResult(
+                        result);
+
+                Console.WriteLine();
+                Console.WriteLine("================================================");
+                Console.WriteLine(" AZURE SPEECH FAILURE");
+                Console.WriteLine("================================================");
+
+                Console.WriteLine(
+                    $"Reason  : {cancellation.Reason}");
+
+                Console.WriteLine(
+                    $"Code    : {cancellation.ErrorCode}");
+
+                Console.WriteLine(
+                    $"Details : {cancellation.ErrorDetails}");
+
+                Console.WriteLine(
+                    "================================================");
+
+                return null;
+            }
+
+            Console.WriteLine(
+                $"[SPEECH] Unexpected result: {result.Reason}");
+
+            return null;
         }
         catch (Exception ex)
         {
-            lock (_startLock)
-            {
-                _started = false;
-            }
-
             Console.WriteLine();
             Console.WriteLine("================================================");
             Console.WriteLine(" SPEECH SDK FAILURE");
             Console.WriteLine("================================================");
-            Console.WriteLine(ex.Message);
-            Console.WriteLine(ex);
+
+            Console.WriteLine(
+                ex.Message);
+
+            Console.WriteLine(
+                ex);
+
             throw;
         }
-    }
-
-    public void ProcessAudio(byte[] audioData)
-    {
-        if (_pushStream == null)
+        finally
         {
-            Console.WriteLine("Speech stream not initialized");
-            return;
+            try
+            {
+                if (File.Exists(
+                        tempFile))
+                {
+                    File.Delete(
+                        tempFile);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[SPEECH] Could not delete temp file: {ex.Message}");
+            }
         }
-
-        if (audioData == null || audioData.Length == 0)
-        {
-            return;
-        }
-
-        _pushStream.Write(audioData);
-    }
-
-    public async Task StopAsync()
-    {
-        if (_recognizer != null)
-        {
-            await _recognizer.StopContinuousRecognitionAsync();
-        }
-
-        _pushStream?.Close();
     }
 }
