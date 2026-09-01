@@ -8,12 +8,16 @@ public class MeetingMediaHandler
 {
     private readonly MediaSessionService _mediaSessionService;
 
-    public MeetingMediaHandler(MediaSessionService mediaSessionService)
+    public MeetingMediaHandler(
+        MediaSessionService mediaSessionService)
     {
-        _mediaSessionService = mediaSessionService;
+        _mediaSessionService =
+            mediaSessionService;
     }
 
-    public async Task<HttpResponseMessage> ProcessNotificationAsync(HttpRequest request)
+    public async Task<HttpResponseMessage>
+        ProcessNotificationAsync(
+            HttpRequest request)
     {
         Console.WriteLine();
         Console.WriteLine("======================================");
@@ -23,135 +27,432 @@ public class MeetingMediaHandler
         request.EnableBuffering();
 
         string body;
-        using (var reader = new StreamReader(request.Body, leaveOpen: true))
+
+        using (var reader =
+               new StreamReader(
+                   request.Body,
+                   leaveOpen: true))
         {
-            body = await reader.ReadToEndAsync();
+            body =
+                await reader
+                    .ReadToEndAsync();
         }
 
         request.Body.Position = 0;
 
         Console.WriteLine(body);
-        Console.WriteLine("================================================");
+
+        Console.WriteLine(
+            "================================================");
 
         HttpResponseMessage sdkResponse;
+
         try
         {
-            using var requestMessage = ToHttpRequestMessage(request, body);
-            sdkResponse = await _mediaSessionService.ProcessNotificationAsync(requestMessage);
+            using var requestMessage =
+                ToHttpRequestMessage(
+                    request,
+                    body);
+
+            sdkResponse =
+                await _mediaSessionService
+                    .ProcessNotificationAsync(
+                        requestMessage);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Notification processing error : {ex.Message}");
-            sdkResponse = new HttpResponseMessage(System.Net.HttpStatusCode.OK);
+            Console.WriteLine(
+                $"Notification SDK processing error : {ex.Message}");
+
+            sdkResponse =
+                new HttpResponseMessage(
+                    System.Net.HttpStatusCode.OK);
         }
 
         try
         {
-            await StartMediaIfCallEstablished(body);
+            await ProcessCustomNotificationAsync(
+                body);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Notification processing error : {ex.Message}");
+            Console.WriteLine(
+                $"Custom notification error : {ex.Message}");
+
+            Console.WriteLine(
+                ex);
         }
 
         return sdkResponse;
     }
 
-    private async Task StartMediaIfCallEstablished(string notificationBody)
+    // ============================================================
+    // CUSTOM GRAPH NOTIFICATION PROCESSING
+    // ============================================================
+
+    private async Task ProcessCustomNotificationAsync(
+        string notificationBody)
     {
-        if (string.IsNullOrWhiteSpace(notificationBody))
+        if (string.IsNullOrWhiteSpace(
+                notificationBody))
         {
             return;
         }
 
-        using var json = JsonDocument.Parse(notificationBody);
-        var root = json.RootElement;
+        using var json =
+            JsonDocument.Parse(
+                notificationBody);
 
-        if (!root.TryGetProperty("value", out var values) || values.ValueKind != JsonValueKind.Array)
+        var root =
+            json.RootElement;
+
+        if (!root.TryGetProperty(
+                "value",
+                out var values) ||
+            values.ValueKind !=
+                JsonValueKind.Array)
         {
             return;
         }
 
-        foreach (var item in values.EnumerateArray())
+        foreach (var item
+                 in values.EnumerateArray())
         {
-            var callId = ExtractCallId(GetString(item, "resource") ?? GetString(item, "resourceUrl"));
-            var resourceData = item.TryGetProperty("resourceData", out var rd) ? rd : default;
+            var resource =
+                GetString(
+                    item,
+                    "resource")
+                ??
+                GetString(
+                    item,
+                    "resourceUrl");
 
-            if (resourceData.ValueKind == JsonValueKind.Object &&
-                resourceData.TryGetProperty("state", out var state) &&
-                string.Equals(state.GetString(), "established", StringComparison.OrdinalIgnoreCase) &&
-                callId != null)
+            var callId =
+                ExtractCallId(
+                    resource);
+
+            if (!item.TryGetProperty(
+                    "resourceData",
+                    out var resourceData))
             {
-                Console.WriteLine($"Call established : {callId}");
-                await _mediaSessionService.StartMediaSessionAsync(callId);
+                continue;
             }
 
-            if (resourceData.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var participant in resourceData.EnumerateArray())
-                {
-                    if (!participant.TryGetProperty("mediaStreams", out var streams))
-                    {
-                        continue;
-                    }
+            // ============================================================
+            // RECORD OPERATION
+            // ============================================================
 
-                    foreach (var stream in streams.EnumerateArray())
-                    {
-                        if (stream.TryGetProperty("mediaType", out var mediaType) &&
-                            mediaType.GetString() == "audio" &&
-                            callId != null)
-                        {
-                            Console.WriteLine("Audio stream detected");
-                            Console.WriteLine($"Call ID : {callId}");
-                            await _mediaSessionService.StartMediaSessionAsync(callId);
-                        }
-                    }
+            if (resourceData.ValueKind ==
+                JsonValueKind.Object)
+            {
+                var odataType =
+                    GetString(
+                        resourceData,
+                        "@odata.type");
+
+                if (string.Equals(
+                        odataType,
+                        "#microsoft.graph.recordOperation",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    await HandleRecordOperationAsync(
+                        callId,
+                        resourceData);
+
+                    continue;
+                }
+            }
+
+            // ============================================================
+            // CALL ESTABLISHED
+            // ============================================================
+
+            if (resourceData.ValueKind ==
+                    JsonValueKind.Object &&
+                resourceData.TryGetProperty(
+                    "state",
+                    out var state))
+            {
+                var callState =
+                    state.GetString();
+
+                if (string.Equals(
+                        callState,
+                        "established",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(
+                        callId))
+                {
+                    Console.WriteLine();
+                    Console.WriteLine(
+                        $"Call established : {callId}");
+
+                    await _mediaSessionService
+                        .StartMediaSessionAsync(
+                            callId);
                 }
             }
         }
     }
 
-    private static HttpRequestMessage ToHttpRequestMessage(HttpRequest request, string body)
+    // ============================================================
+    // HANDLE RECORD OPERATION CALLBACK
+    // ============================================================
+
+    private async Task HandleRecordOperationAsync(
+        string? callId,
+        JsonElement resourceData)
     {
-        var requestMessage = new HttpRequestMessage
-        {
-            Method = new HttpMethod(request.Method),
-            RequestUri = new Uri(
-                $"{request.Scheme}://{request.Host}{request.PathBase}{request.Path}{request.QueryString}"),
-            Content = new StringContent(body)
-        };
+        var status =
+            GetString(
+                resourceData,
+                "status");
 
-        requestMessage.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" RECORD OPERATION EVENT");
+        Console.WriteLine("================================================");
 
-        foreach (var header in request.Headers)
+        Console.WriteLine(
+            $"Call ID : {callId ?? "unknown"}");
+
+        Console.WriteLine(
+            $"Status  : {status ?? "unknown"}");
+
+        if (resourceData.TryGetProperty(
+                "resultInfo",
+                out var resultInfo) &&
+            resultInfo.ValueKind ==
+                JsonValueKind.Object)
         {
-            if (!requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray()))
+            var code =
+                GetInt(
+                    resultInfo,
+                    "code");
+
+            var subcode =
+                GetInt(
+                    resultInfo,
+                    "subcode");
+
+            var message =
+                GetString(
+                    resultInfo,
+                    "message");
+
+            Console.WriteLine(
+                $"Result code    : {code}");
+
+            Console.WriteLine(
+                $"Result subcode : {subcode}");
+
+            Console.WriteLine(
+                $"Result message : {message}");
+        }
+
+        if (!string.Equals(
+                status,
+                "completed",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine(
+                "Record operation not completed yet.");
+
+            Console.WriteLine(
+                "================================================");
+
+            return;
+        }
+
+        var recordingLocation =
+            GetString(
+                resourceData,
+                "recordingLocation");
+
+        var recordingAccessToken =
+            GetString(
+                resourceData,
+                "recordingAccessToken");
+
+        if (string.IsNullOrWhiteSpace(
+                callId))
+        {
+            Console.WriteLine(
+                "Call ID missing.");
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(
+                recordingLocation))
+        {
+            Console.WriteLine(
+                "recordingLocation missing.");
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(
+                recordingAccessToken))
+        {
+            Console.WriteLine(
+                "recordingAccessToken missing.");
+
+            return;
+        }
+
+        Console.WriteLine(
+            "Recording is ready.");
+
+        Console.WriteLine(
+            "================================================");
+
+        // Never print recordingAccessToken.
+
+        await _mediaSessionService
+            .ProcessCompletedRecordingAsync(
+                callId,
+                recordingLocation,
+                recordingAccessToken);
+    }
+
+    // ============================================================
+    // CONVERT ASP.NET REQUEST TO GRAPH SDK REQUEST
+    // ============================================================
+
+    private static HttpRequestMessage ToHttpRequestMessage(
+        HttpRequest request,
+        string body)
+    {
+        var requestMessage =
+            new HttpRequestMessage
             {
-                requestMessage.Content.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
+                Method =
+                    new HttpMethod(
+                        request.Method),
+
+                RequestUri =
+                    new Uri(
+                        $"{request.Scheme}://{request.Host}{request.PathBase}{request.Path}{request.QueryString}"),
+
+                Content =
+                    new StringContent(
+                        body)
+            };
+
+        requestMessage
+            .Content
+            .Headers
+            .ContentType =
+            new MediaTypeHeaderValue(
+                "application/json");
+
+        foreach (var header
+                 in request.Headers)
+        {
+            if (!requestMessage
+                    .Headers
+                    .TryAddWithoutValidation(
+                        header.Key,
+                        header.Value.ToArray()))
+            {
+                requestMessage
+                    .Content
+                    .Headers
+                    .TryAddWithoutValidation(
+                        header.Key,
+                        header.Value.ToArray());
             }
         }
 
         return requestMessage;
     }
 
-    private static string? GetString(JsonElement item, string name)
-    {
-        return item.TryGetProperty(name, out var value) ? value.GetString() : null;
-    }
+    // ============================================================
+    // JSON STRING HELPER
+    // ============================================================
 
-    private static string? ExtractCallId(string? resource)
+    private static string? GetString(
+        JsonElement element,
+        string name)
     {
-        if (string.IsNullOrEmpty(resource))
+        if (!element.TryGetProperty(
+                name,
+                out var value))
         {
             return null;
         }
 
-        var parts = resource.Split('/');
-        var index = Array.IndexOf(parts, "calls");
-
-        if (index >= 0 && parts.Length > index + 1)
+        if (value.ValueKind ==
+            JsonValueKind.String)
         {
-            return parts[index + 1];
+            return value.GetString();
+        }
+
+        return value.ToString();
+    }
+
+    // ============================================================
+    // JSON INT HELPER
+    // ============================================================
+
+    private static int? GetInt(
+        JsonElement element,
+        string name)
+    {
+        if (!element.TryGetProperty(
+                name,
+                out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind ==
+                JsonValueKind.Number &&
+            value.TryGetInt32(
+                out var number))
+        {
+            return number;
+        }
+
+        return null;
+    }
+
+    // ============================================================
+    // EXTRACT CALL ID
+    //
+    // Example:
+    //
+    // /app/calls/{callId}
+    //
+    // /communications/calls/{callId}/operations/{operationId}
+    // ============================================================
+
+    private static string? ExtractCallId(
+        string? resource)
+    {
+        if (string.IsNullOrWhiteSpace(
+                resource))
+        {
+            return null;
+        }
+
+        var parts =
+            resource.Split(
+                '/',
+                StringSplitOptions.RemoveEmptyEntries);
+
+        for (var i = 0;
+             i < parts.Length - 1;
+             i++)
+        {
+            if (string.Equals(
+                    parts[i],
+                    "calls",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return parts[i + 1];
+            }
         }
 
         return null;
