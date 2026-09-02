@@ -79,6 +79,7 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddHttpClient();
 
 builder.Services.AddSingleton<SpeechSynthesisService>();
+builder.Services.AddSingleton<MeetingContextService>();
 builder.Services.AddSingleton<AiResponseService>();
 builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
 builder.Services.AddSingleton<GraphAuthService>();
@@ -321,7 +322,9 @@ app.MapPost(
                 await mediaSessionService
                     .JoinMeetingAsync(
                         request.MeetingId,
-                        request.Passcode);
+                        request.Passcode,
+                        request.OrganizerUserId,
+                        request.JoinWebUrl);
 
             Console.WriteLine();
             Console.WriteLine(
@@ -456,5 +459,7 @@ app.Run();
 
 public record JoinRequest(
     string MeetingId,
-    string? Passcode
+    string? Passcode,
+    string? OrganizerUserId = null,
+    string? JoinWebUrl = null
 );

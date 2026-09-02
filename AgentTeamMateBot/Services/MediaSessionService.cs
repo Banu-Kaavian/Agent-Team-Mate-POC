@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using AgentTeamMateBot.Media;
 using Microsoft.Graph.Communications.Calls;
 using Microsoft.Graph.Communications.Client;
@@ -21,6 +22,7 @@ public class MediaSessionService
     private readonly SpeechRecognitionService _speechService;
     private readonly AiResponseService _aiResponseService;
     private readonly SpeechSynthesisService _speechSynthesisService;
+    private readonly MeetingContextService _meetingContextService;
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
     private readonly ConcurrentDictionary<string, byte> _recordingStarted = new();
@@ -42,7 +44,8 @@ public class MediaSessionService
         AudioHandler audioHandler,
         SpeechRecognitionService speechService,
         AiResponseService aiResponseService,
-        SpeechSynthesisService speechSynthesisService)
+        SpeechSynthesisService speechSynthesisService,
+        MeetingContextService meetingContextService)
     {
         _configuration = configuration;
         _graphAuthService = graphAuthService;
@@ -50,6 +53,7 @@ public class MediaSessionService
         _speechService = speechService;
         _aiResponseService = aiResponseService;
         _speechSynthesisService = speechSynthesisService;
+        _meetingContextService = meetingContextService;
     }
 
     public ICommunicationsClient? Client => _client;
@@ -169,7 +173,9 @@ public class MediaSessionService
 
     public async Task<ICall> JoinMeetingAsync(
         string meetingId,
-        string? passcode)
+        string? passcode,
+        string? organizerUserId = null,
+        string? joinWebUrl = null)
     {
         if (!_initialized ||
             _client == null)
@@ -322,6 +328,17 @@ public class MediaSessionService
             TrackCall(
                 statefulCall);
 
+            _meetingContextService.RegisterCall(
+                statefulCall.Id,
+                tenantId,
+                normalizedMeetingId,
+                organizerUserId,
+                joinWebUrl);
+
+            _meetingContextService.EnrichFromCallResource(
+                statefulCall.Id,
+                statefulCall.Resource);
+
             Console.WriteLine(
                 $"Call ID : {statefulCall.Id}");
 
@@ -432,6 +449,9 @@ public class MediaSessionService
         if (string.IsNullOrWhiteSpace(
                 callId))
         {
+            Console.WriteLine(
+                "[LISTEN LOOP] Restart skipped: call ID is missing.");
+
             return;
         }
 
@@ -443,6 +463,9 @@ public class MediaSessionService
                 callId,
                 0))
         {
+            Console.WriteLine(
+                "[LISTEN LOOP] Restart skipped: recordResponse already started for this call.");
+
             Console.WriteLine(
                 $"[RECORD] recordResponse already started for {callId}");
 
@@ -610,6 +633,8 @@ public class MediaSessionService
         string recordingLocation,
         string recordingAccessToken)
     {
+        var continueListeningSilently = false;
+
         try
         {
             Console.WriteLine();
@@ -686,14 +711,55 @@ public class MediaSessionService
                 return;
             }
 
+            var transcript =
+                _meetingContextService.AppendLiveTranscript(
+                    callId,
+                    recognizedText);
+
             Console.WriteLine();
             Console.WriteLine("================================================");
-            Console.WriteLine(" USER SPOKE");
+            Console.WriteLine(" MEETING TRANSCRIPT");
             Console.WriteLine("================================================");
-
             Console.WriteLine(
-                recognizedText);
+                $"Call ID : {callId}");
+            Console.WriteLine(
+                transcript);
+            Console.WriteLine(
+                "================================================");
 
+            if (!IsAgentInvocation(
+                    recognizedText))
+            {
+                Console.WriteLine();
+                Console.WriteLine("================================================");
+                Console.WriteLine(" PASSIVE MEETING SPEECH");
+                Console.WriteLine("================================================");
+                Console.WriteLine(
+                    "Agent Nova was not invoked.");
+                Console.WriteLine(
+                    "Continuing to listen.");
+                Console.WriteLine(
+                    "================================================");
+
+                Console.WriteLine(
+                    "[LISTEN LOOP] Passive segment completed. Restarting recordResponse.");
+
+                continueListeningSilently = true;
+            }
+            else
+            {
+            var question =
+                RemoveActivationPhrase(
+                    recognizedText);
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" AGENT NOVA INVOCATION DETECTED");
+            Console.WriteLine("================================================");
+            Console.WriteLine(
+                $"Original speech : {recognizedText}");
+            Console.WriteLine(
+                $"Question        : {question}");
             Console.WriteLine(
                 "================================================");
 
@@ -705,7 +771,7 @@ public class MediaSessionService
                 await _aiResponseService
                     .GetResponseAsync(
                         callId,
-                        recognizedText);
+                        question);
 
             if (string.IsNullOrWhiteSpace(
                     aiResponse))
@@ -762,6 +828,7 @@ public class MediaSessionService
             await PlayPromptAsync(
                 callId,
                 audioUrl);
+            }
         }
         catch (Exception ex)
         {
@@ -781,6 +848,12 @@ public class MediaSessionService
             _recordingStarted.TryRemove(
                 callId,
                 out _);
+        }
+
+        if (continueListeningSilently)
+        {
+            await StartNextConversationTurnAsync(
+                callId);
         }
     }
 
@@ -987,6 +1060,10 @@ public class MediaSessionService
 
             TrackCall(
                 call);
+
+            _meetingContextService.EnrichFromCallResource(
+                call.Id,
+                call.Resource);
         }
 
         foreach (var call
@@ -1011,6 +1088,9 @@ public class MediaSessionService
                 out _);
 
             _aiResponseService.ClearConversation(
+                call.Id);
+
+            _meetingContextService.Clear(
                 call.Id);
 
             if (_calls.TryRemove(
@@ -1047,6 +1127,10 @@ public class MediaSessionService
 
         Console.WriteLine(
             $"[CALL] {call.Id} state={state}");
+
+        _meetingContextService.EnrichFromCallResource(
+            call.Id,
+            call.Resource);
 
         if (state ==
             CallState.Established)
@@ -1106,9 +1190,100 @@ public class MediaSessionService
             _aiResponseService.ClearConversation(
                 call.Id);
 
+            _meetingContextService.Clear(
+                call.Id);
+
             Console.WriteLine(
                 "================================================");
         }
+    }
+
+    // ============================================================
+    // AGENT INVOCATION
+    // ============================================================
+
+    private static readonly Regex AgentInvocationPattern =
+        new(
+            @"\bAgent\s+Nova\b",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static readonly Regex LeftoverGreetingPattern =
+        new(
+            @"^(?:hey|hi|hello)(?:\s+there)?\s*[,:]?\s*",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static bool IsAgentInvocation(
+        string recognizedText)
+    {
+        if (string.IsNullOrWhiteSpace(
+                recognizedText))
+        {
+            return false;
+        }
+
+        return AgentInvocationPattern.IsMatch(
+            recognizedText);
+    }
+
+    private static string RemoveActivationPhrase(
+        string recognizedText)
+    {
+        if (string.IsNullOrWhiteSpace(
+                recognizedText))
+        {
+            return recognizedText;
+        }
+
+        var stripped =
+            AgentInvocationPattern.Replace(
+                recognizedText,
+                " ",
+                1);
+
+        stripped =
+            LeftoverGreetingPattern.Replace(
+                stripped,
+                string.Empty,
+                1);
+
+        stripped =
+            Regex.Replace(
+                stripped,
+                @"\s+",
+                " ");
+
+        stripped =
+            stripped.Trim(
+                ' ',
+                ',',
+                '.',
+                '!',
+                '?',
+                ':',
+                ';',
+                '-',
+                '"',
+                '\'');
+
+        if (string.IsNullOrWhiteSpace(
+                stripped))
+        {
+            return recognizedText;
+        }
+
+        if (char.IsLetter(stripped[0]) &&
+            char.IsLower(stripped[0]))
+        {
+            stripped =
+                char.ToUpperInvariant(stripped[0]) +
+                stripped[1..];
+        }
+
+        return stripped;
     }
 
     // ============================================================
