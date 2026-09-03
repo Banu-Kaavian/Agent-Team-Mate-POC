@@ -569,6 +569,21 @@ public class AppHostedMediaService
             return;
         }
 
+        if (WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            BotLog.Info("Leaving meeting...");
+            _ = Task.Run(async () => await LeaveMeetingAsync(callId, sayGoodbye: true));
+            return;
+        }
+
+        if (!WakeWordDetector.IsActionableRequest(recognizedText))
+        {
+            Console.WriteLine(
+                $"[APP-HOSTED] Ignoring casual Agent Nova mention: {recognizedText}");
+            return;
+        }
+
         var question =
             WakeWordDetector.RemoveActivationPhrase(recognizedText);
 
@@ -627,6 +642,47 @@ public class AppHostedMediaService
             }
         });
     }
+
+    private async Task LeaveMeetingAsync(string callId, bool sayGoodbye)
+    {
+        try
+        {
+            if (sayGoodbye)
+            {
+                try
+                {
+                    var pcm = await SynthesizeSpeechToPcmAsync(
+                        "Goodbye. I am leaving the meeting now.");
+                    if (pcm != null && pcm.Length > 0)
+                    {
+                        await SendPcmToAudioSocketAsync(callId, pcm);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[APP-HOSTED LEAVE] Goodbye audio failed: {ex.Message}");
+                }
+            }
+
+            if (!_calls.TryGetValue(callId, out var call))
+            {
+                BotLog.Info("Error: Call not found; cannot leave meeting.");
+                return;
+            }
+
+            await call.DeleteAsync();
+            BotLog.Info("Left the meeting.");
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Could not leave meeting. {ex.Message}");
+            Console.WriteLine($"[APP-HOSTED LEAVE] {ex}");
+        }
+    }
+
+    // ============================================================
+    // SYNTHESIZE SPEECH TO RAW PCM / WELCOME
+    // ============================================================
 
     private async Task PlayWelcomeAsync(string callId)
     {

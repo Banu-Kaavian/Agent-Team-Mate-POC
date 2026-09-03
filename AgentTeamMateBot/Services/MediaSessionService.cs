@@ -818,6 +818,24 @@ public class MediaSessionService
             return;
         }
 
+        if (invoked &&
+            WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            BotLog.Info("Leaving meeting...");
+            await LeaveMeetingAsync(callId);
+            return;
+        }
+
+        if (requireWakeWord &&
+            invoked &&
+            !WakeWordDetector.IsActionableRequest(recognizedText))
+        {
+            Console.WriteLine(
+                $"[LISTEN] Ignoring casual Agent Nova mention: {recognizedText}");
+            return;
+        }
+
         var question =
             invoked
                 ? WakeWordDetector.RemoveActivationPhrase(
@@ -841,6 +859,42 @@ public class MediaSessionService
         await ProcessAgentResponseAsync(
             callId,
             question);
+    }
+
+    private async Task LeaveMeetingAsync(string callId)
+    {
+        try
+        {
+            if (!_calls.TryGetValue(callId, out var call))
+            {
+                BotLog.Info("Error: Call not found; cannot leave meeting.");
+                return;
+            }
+
+            try
+            {
+                var goodbyeUrl =
+                    await _speechSynthesisService.SynthesizeSpeechAsync(
+                        "Goodbye. I am leaving the meeting now.");
+                if (!string.IsNullOrWhiteSpace(goodbyeUrl))
+                {
+                    await PlayPromptAsync(callId, goodbyeUrl);
+                    await Task.Delay(2500);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[LEAVE] Goodbye audio failed: {ex.Message}");
+            }
+
+            await call.DeleteAsync();
+            BotLog.Info("Left the meeting.");
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Could not leave meeting. {ex.Message}");
+            Console.WriteLine($"[LEAVE] {ex}");
+        }
     }
 
     private async Task ProcessAgentResponseAsync(
