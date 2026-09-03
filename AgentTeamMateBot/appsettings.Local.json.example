@@ -1,0 +1,22 @@
+{
+  "Bot": {
+    "ClientId": "",
+    "TenantId": "",
+    "ClientSecret": ""
+  },
+  "Media": {
+    "PublicIpAddress": "YOUR_VM_PUBLIC_IP",
+    "PrivateIpAddress": "",
+    "CertificateThumbprint": "YOUR_CERT_THUMBPRINT"
+  },
+  "Speech": {
+    "Key": "YOUR_AZURE_SPEECH_KEY",
+    "Region": "westus3"
+  },
+  "AzureOpenAI": {
+    "Endpoint": "https://YOUR-RESOURCE.openai.azure.com/",
+    "Deployment": "gpt-5-mini",
+    "ApiKey": "YOUR_AZURE_OPENAI_KEY",
+    "ApiVersion": "2025-01-01-preview"
+  }
+}

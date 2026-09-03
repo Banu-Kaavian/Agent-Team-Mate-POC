@@ -4,6 +4,13 @@ using AgentTeamMateBot.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Machine-local secrets/overrides. Keep real keys in appsettings.Local.json
+// on the VM (gitignored). Survives PowerShell restarts.
+builder.Configuration.AddJsonFile(
+    "appsettings.Local.json",
+    optional: true,
+    reloadOnChange: true);
+
 // User secrets are Development-only by default. Load them whenever present
 // so `dotnet run` works even if ASPNETCORE_ENVIRONMENT is Production.
 builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);

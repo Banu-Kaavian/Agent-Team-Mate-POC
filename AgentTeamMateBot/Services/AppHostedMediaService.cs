@@ -30,6 +30,7 @@ public class AppHostedMediaService
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
     private readonly ConcurrentDictionary<string, ILocalMediaSession> _mediaSessions = new();
     private readonly ConcurrentDictionary<Guid, AudioSocketBinding> _audioBindings = new();
+    private readonly ConcurrentDictionary<string, byte> _welcomePlayed = new();
     private readonly object _initLock = new();
 
     // Track the active call ID for the continuous recognizer callback
@@ -381,6 +382,12 @@ public class AppHostedMediaService
         binding.SendStatusHandler = (_, args) =>
         {
             Console.WriteLine($"[AUDIO SOCKET] SendStatus={args.MediaSendStatus} call={binding.CallId}");
+
+            if (args.MediaSendStatus == MediaSendStatus.Active &&
+                !string.IsNullOrWhiteSpace(binding.CallId))
+            {
+                _ = PlayWelcomeAsync(binding.CallId);
+            }
         };
 
         audioSocket.AudioMediaReceived += binding.AudioReceivedHandler;
@@ -427,6 +434,7 @@ public class AppHostedMediaService
         foreach (var call in args.RemovedResources)
         {
             Console.WriteLine($"[APP-HOSTED CALL] Removed {call.Id}");
+            _welcomePlayed.TryRemove(call.Id, out _);
             _calls.TryRemove(call.Id, out _);
             if (_mediaSessions.TryRemove(call.Id, out var session))
             {
@@ -560,6 +568,9 @@ public class AppHostedMediaService
         Console.WriteLine($"Question : {question}");
         Console.WriteLine("================================================");
 
+        BotLog.Info($"User: {recognizedText}");
+        BotLog.Info("Processing...");
+
         _ = Task.Run(async () =>
         {
             try
@@ -570,6 +581,7 @@ public class AppHostedMediaService
 
                 if (string.IsNullOrWhiteSpace(aiResponse))
                 {
+                    BotLog.Info("Error: No AI response text.");
                     Console.WriteLine("[APP-HOSTED AI] No response received.");
                     return;
                 }
@@ -581,11 +593,14 @@ public class AppHostedMediaService
                 Console.WriteLine(aiResponse);
                 Console.WriteLine("================================================");
 
+                BotLog.Info($"Nova: {aiResponse}");
+
                 var pcmAudio =
                     await SynthesizeSpeechToPcmAsync(aiResponse);
 
                 if (pcmAudio == null || pcmAudio.Length == 0)
                 {
+                    BotLog.Info("Error: Could not generate voice audio.");
                     Console.WriteLine("[APP-HOSTED TTS] No audio generated.");
                     return;
                 }
@@ -594,10 +609,42 @@ public class AppHostedMediaService
             }
             catch (Exception ex)
             {
+                BotLog.Info($"Error: {ex.Message}");
                 Console.WriteLine(
                     $"[APP-HOSTED] AI/TTS pipeline error: {ex.Message}");
             }
         });
+    }
+
+    private async Task PlayWelcomeAsync(string callId)
+    {
+        if (!_welcomePlayed.TryAdd(callId, 0))
+        {
+            return;
+        }
+
+        try
+        {
+            BotLog.Info("Playing welcome...");
+
+            var pcmAudio = await SynthesizeSpeechToPcmAsync(
+                "Hi, I am Agent Nova. I am listening. Say your request.");
+
+            if (pcmAudio == null || pcmAudio.Length == 0)
+            {
+                BotLog.Info("Error: Could not generate welcome audio.");
+                return;
+            }
+
+            // Small delay so Teams media path finishes settling.
+            await Task.Delay(400);
+            SendPcmToAudioSocket(callId, pcmAudio);
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Welcome playback failed. {ex.Message}");
+            Console.WriteLine($"[APP-HOSTED WELCOME] {ex.Message}");
+        }
     }
 
     // ============================================================
