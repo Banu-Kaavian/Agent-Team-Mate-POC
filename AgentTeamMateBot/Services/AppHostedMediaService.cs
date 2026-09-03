@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
@@ -94,6 +95,7 @@ public class AppHostedMediaService
                     ?? "teammate-bot.westus3.cloudapp.azure.com";
 
                 WarnIfTunnelCallback(callbackUri);
+                EnsureNativeMediaPresent();
 
                 var internalPort = _configuration.GetValue("Media:InternalPort", 8445);
                 var publicPort = _configuration.GetValue("Media:PublicPort", 8445);
@@ -104,14 +106,22 @@ public class AppHostedMediaService
                 var privateIp = ResolvePrivateIp();
                 var certificate = LoadCertificate(serviceFqdn);
 
+                if (!certificate.HasPrivateKey)
+                {
+                    throw new InvalidOperationException(
+                        $"Certificate {certificate.Thumbprint} has no private key accessible to this process. " +
+                        "Import the PFX into LocalMachine\\My and grant the bot user Read on the private key.");
+                }
+
+                // EchoBot / Media SDK loads the cert from LocalMachine by thumbprint.
                 var instanceSettings = new MediaPlatformInstanceSettings
                 {
                     ServiceFqdn = serviceFqdn,
+                    CertificateThumbprint = certificate.Thumbprint,
                     InstancePublicIPAddress = publicIp,
                     InstanceInternalPort = internalPort,
                     InstancePublicPort = publicPort,
-                    MediaPortRange = new PortRange((uint)portMin, (uint)portMax),
-                    Certificate = certificate
+                    MediaPortRange = new PortRange((uint)portMin, (uint)portMax)
                 };
 
                 var mediaPlatformSettings = new MediaPlatformSettings
@@ -121,10 +131,11 @@ public class AppHostedMediaService
                     MediaPlatformLogger = _mediaLogger
                 };
 
-                BotLog.Info($"MediaPlatform FQDN={serviceFqdn} PublicIP={publicIp} Cert={certificate.Thumbprint}");
+                BotLog.Info(
+                    $"MediaPlatform FQDN={serviceFqdn} PublicIP={publicIp} PrivateIP={privateIp?.ToString() ?? "(detected-none)"} Cert={certificate.Thumbprint}");
                 Console.WriteLine($"Service FQDN     : {serviceFqdn}");
                 Console.WriteLine($"Public IP        : {publicIp}");
-                Console.WriteLine($"Private IP       : {(privateIp?.ToString() ?? "(not used; SDK property not implemented in this package)")}");
+                Console.WriteLine($"Private IP       : {(privateIp?.ToString() ?? "(not required by this SDK package)")}");
                 Console.WriteLine($"Control port     : {internalPort} internal / {publicPort} public");
                 Console.WriteLine($"Media UDP ports  : {portMin}-{portMax}");
                 Console.WriteLine($"Certificate      : {certificate.Subject}");
@@ -164,20 +175,21 @@ public class AppHostedMediaService
             {
                 _initialized = false;
                 _mediaPlatformReady = false;
-                _initError = ex.Message;
+                _initError = FormatExceptionChain(ex);
 
-                BotLog.Info($"MediaPlatform FAILED: {ex.Message}");
+                BotLog.Info($"MediaPlatform FAILED: {_initError}");
                 Console.WriteLine();
                 Console.WriteLine("================================================");
                 Console.WriteLine(" MEDIA PLATFORM INITIALIZATION FAILURE");
                 Console.WriteLine("================================================");
-                Console.WriteLine(ex.Message);
+                Console.WriteLine(_initError);
                 Console.WriteLine(ex);
                 Console.WriteLine();
                 Console.WriteLine("Phase 2 app-hosted listening is BLOCKED until MediaPlatform starts.");
-                Console.WriteLine("Required: Azure Windows Server x64 VM, VC++ x64 runtime,");
-                Console.WriteLine("SSL cert for Bot:ServiceFqdn, Media:PublicIpAddress,");
-                Console.WriteLine("NSG inbound TCP 8445 and UDP media port range.");
+                Console.WriteLine("Required: full Windows Server (not Core), VC++ x64 runtime,");
+                Console.WriteLine("Windows Media Foundation, SSL cert in LocalMachine\\My,");
+                Console.WriteLine("Media:PublicIpAddress + Media:PrivateIpAddress,");
+                Console.WriteLine("NSG inbound TCP 443/8445 and UDP 20000-20999.");
                 Console.WriteLine("Service-hosted POST /api/join is unaffected.");
                 Console.WriteLine("================================================");
             }
@@ -758,12 +770,99 @@ public class AppHostedMediaService
     private IPAddress? ResolvePrivateIp()
     {
         var configured = _configuration["Media:PrivateIpAddress"];
-        if (string.IsNullOrWhiteSpace(configured))
+        if (!string.IsNullOrWhiteSpace(configured))
         {
-            return null;
+            return IPAddress.Parse(configured.Trim());
         }
 
-        return IPAddress.Parse(configured.Trim());
+        try
+        {
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != OperationalStatus.Up)
+                {
+                    continue;
+                }
+
+                if (nic.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                {
+                    continue;
+                }
+
+                foreach (var address in nic.GetIPProperties().UnicastAddresses)
+                {
+                    if (address.Address.AddressFamily != AddressFamily.InterNetwork)
+                    {
+                        continue;
+                    }
+
+                    if (IPAddress.IsLoopback(address.Address))
+                    {
+                        continue;
+                    }
+
+                    // Prefer Azure VNet private ranges.
+                    var bytes = address.Address.GetAddressBytes();
+                    var isPrivate =
+                        bytes[0] == 10 ||
+                        (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+                        (bytes[0] == 192 && bytes[1] == 168);
+
+                    if (isPrivate)
+                    {
+                        return address.Address;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MEDIA] Private IP auto-detect failed: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    private static void EnsureNativeMediaPresent()
+    {
+        var nativeMedia = Path.Combine(AppContext.BaseDirectory, "NativeMedia.dll");
+        if (!File.Exists(nativeMedia))
+        {
+            throw new InvalidOperationException(
+                $"NativeMedia.dll was not found next to the app at {AppContext.BaseDirectory}. " +
+                "Rebuild so Microsoft.Skype.Bots.Media native binaries are copied to the output.");
+        }
+
+        var required = new[]
+        {
+            "RtmPal.dll",
+            "RtmCodecs.dll",
+            "skypert.dll",
+            "Ijwhost.dll"
+        };
+
+        var missing = required
+            .Where(name => !File.Exists(Path.Combine(AppContext.BaseDirectory, name)))
+            .ToArray();
+
+        if (missing.Length > 0)
+        {
+            throw new InvalidOperationException(
+                "Media native dependencies missing from output: " +
+                string.Join(", ", missing) +
+                $". Output folder: {AppContext.BaseDirectory}");
+        }
+    }
+
+    private static string FormatExceptionChain(Exception ex)
+    {
+        var parts = new List<string>();
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            parts.Add($"{current.GetType().Name}: {current.Message}");
+        }
+
+        return string.Join(" => ", parts);
     }
 
     private X509Certificate2 LoadCertificate(string host)

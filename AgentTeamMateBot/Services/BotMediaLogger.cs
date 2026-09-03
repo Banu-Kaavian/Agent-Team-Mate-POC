@@ -16,6 +16,11 @@ public class BotMediaLogger : IBotMediaLogger
         MediaLogLevel level,
         string logStatement)
     {
+        if (level is MediaLogLevel.Error or MediaLogLevel.Warning)
+        {
+            BotLog.Info($"[MEDIA SDK] {logStatement}");
+        }
+
         var logLevel =
             level switch
             {
