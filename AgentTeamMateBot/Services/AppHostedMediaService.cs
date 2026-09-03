@@ -65,6 +65,8 @@ public class AppHostedMediaService
 
     public bool IsInitialized => _initialized && _mediaPlatformReady;
 
+    public string? InitError => _initError;
+
     public bool IsAppHostedCall(string? callId)
     {
         return !string.IsNullOrWhiteSpace(callId) &&
@@ -82,10 +84,7 @@ public class AppHostedMediaService
 
             try
             {
-                Console.WriteLine();
-                Console.WriteLine("================================================");
-                Console.WriteLine(" MEDIA PLATFORM INITIALIZATION");
-                Console.WriteLine("================================================");
+                BotLog.Info("Initializing MediaPlatform...");
 
                 var clientId = _graphAuthService.ClientId;
                 var callbackUri = _configuration["Bot:CallbackUri"]
@@ -122,6 +121,7 @@ public class AppHostedMediaService
                     MediaPlatformLogger = _mediaLogger
                 };
 
+                BotLog.Info($"MediaPlatform FQDN={serviceFqdn} PublicIP={publicIp} Cert={certificate.Thumbprint}");
                 Console.WriteLine($"Service FQDN     : {serviceFqdn}");
                 Console.WriteLine($"Public IP        : {publicIp}");
                 Console.WriteLine($"Private IP       : {(privateIp?.ToString() ?? "(not used; SDK property not implemented in this package)")}");
@@ -156,6 +156,7 @@ public class AppHostedMediaService
                 _initialized = true;
                 _initError = null;
 
+                BotLog.Info("MediaPlatform ready.");
                 Console.WriteLine("MEDIA PLATFORM INITIALIZED");
                 Console.WriteLine("================================================");
             }
@@ -165,6 +166,7 @@ public class AppHostedMediaService
                 _mediaPlatformReady = false;
                 _initError = ex.Message;
 
+                BotLog.Info($"MediaPlatform FAILED: {ex.Message}");
                 Console.WriteLine();
                 Console.WriteLine("================================================");
                 Console.WriteLine(" MEDIA PLATFORM INITIALIZATION FAILURE");
@@ -192,8 +194,8 @@ public class AppHostedMediaService
         if (!_initialized || !_mediaPlatformReady || _client == null)
         {
             throw new InvalidOperationException(
-                "App-hosted MediaPlatform is not initialized. " +
-                (_initError ?? "See MEDIA PLATFORM INITIALIZATION FAILURE logs. Continuous audio is NOT proven."));
+                "MediaPlatform was not initialized. " +
+                (_initError ?? "Missing Media:PublicIpAddress, SSL cert for Bot:ServiceFqdn, or VC++ x64 runtime."));
         }
 
         ILocalMediaSession? mediaSession = null;

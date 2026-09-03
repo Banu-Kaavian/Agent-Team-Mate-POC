@@ -128,9 +128,9 @@ app.Services
     .GetRequiredService<MediaSessionService>()
     .Initialize();
 
-app.Services
-    .GetRequiredService<AppHostedMediaService>()
-    .TryInitialize();
+var appHostedMedia =
+    app.Services.GetRequiredService<AppHostedMediaService>();
+appHostedMedia.TryInitialize();
 
 // ================================================================
 // HEALTH CHECK
@@ -138,13 +138,15 @@ app.Services
 
 app.MapGet(
     "/",
-    () =>
+    (AppHostedMediaService appHosted) =>
         Results.Ok(
             new
             {
                 Application = "Agent Team Mate",
                 Status = "Running",
-                Time = DateTime.UtcNow
+                Time = DateTime.UtcNow,
+                MediaPlatform = appHosted.IsInitialized ? "ready" : "failed",
+                MediaPlatformError = appHosted.InitError
             }));
 
 // ================================================================
@@ -462,6 +464,16 @@ Console.WriteLine(" Phase 2  : APP HOSTED      POST /api/join-apphosted");
 Console.WriteLine("================================================");
 
 BotLog.Info("Ready. Waiting for a meeting join.");
+if (appHostedMedia.IsInitialized)
+{
+    BotLog.Info("App-hosted join is available: POST /api/join-apphosted");
+}
+else
+{
+    BotLog.Info(
+        $"App-hosted join is BLOCKED: {appHostedMedia.InitError ?? "MediaPlatform was not initialized"}");
+}
+
 if (!BotLog.Verbose)
 {
     BotLog.Info("Debug logs are off. Set Logging:Verbose to true in appsettings.json to turn them on.");
