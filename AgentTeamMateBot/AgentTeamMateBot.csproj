@@ -8,6 +8,8 @@
 
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Media SDK native callbacks can fault under CET/CFG enforcement. -->
+    <CETCompat>false</CETCompat>
 
     <UserSecretsId>a33eb8eb-3617-496c-abfd-1a3873889bb0</UserSecretsId>
   </PropertyGroup>

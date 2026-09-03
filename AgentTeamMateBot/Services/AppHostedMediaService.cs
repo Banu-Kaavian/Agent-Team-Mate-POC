@@ -386,7 +386,19 @@ public class AppHostedMediaService
             if (args.MediaSendStatus == MediaSendStatus.Active &&
                 !string.IsNullOrWhiteSpace(binding.CallId))
             {
-                _ = PlayWelcomeAsync(binding.CallId);
+                var callId = binding.CallId;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await WaitForCallEstablishedAsync(callId);
+                        await PlayWelcomeAsync(callId);
+                    }
+                    catch (Exception ex)
+                    {
+                        BotLog.Info($"Error: Welcome playback failed. {ex.Message}");
+                    }
+                });
             }
         };
 
@@ -605,7 +617,7 @@ public class AppHostedMediaService
                     return;
                 }
 
-                SendPcmToAudioSocket(callId, pcmAudio);
+                await SendPcmToAudioSocketAsync(callId, pcmAudio);
             }
             catch (Exception ex)
             {
@@ -636,15 +648,30 @@ public class AppHostedMediaService
                 return;
             }
 
-            // Small delay so Teams media path finishes settling.
-            await Task.Delay(400);
-            SendPcmToAudioSocket(callId, pcmAudio);
+            await SendPcmToAudioSocketAsync(callId, pcmAudio);
         }
         catch (Exception ex)
         {
             BotLog.Info($"Error: Welcome playback failed. {ex.Message}");
             Console.WriteLine($"[APP-HOSTED WELCOME] {ex.Message}");
         }
+    }
+
+    private async Task WaitForCallEstablishedAsync(string callId)
+    {
+        for (var i = 0; i < 75; i++)
+        {
+            if (_calls.TryGetValue(callId, out var call) &&
+                call.Resource?.State == CallState.Established)
+            {
+                return;
+            }
+
+            await Task.Delay(200);
+        }
+
+        Console.WriteLine(
+            $"[APP-HOSTED WELCOME] Timed out waiting for Established on {callId}. Playing anyway.");
     }
 
     // ============================================================
@@ -707,14 +734,19 @@ public class AppHostedMediaService
 
     // ============================================================
     // SEND RAW PCM FRAMES VIA AUDIOSOCKET
+    // Media SDK keeps using each buffer after Send returns. Do not
+    // free the unmanaged memory here — AudioSendBuffer.Dispose does.
     // ============================================================
+
+    private Task SendPcmToAudioSocketAsync(string callId, byte[] pcmData)
+    {
+        return Task.Run(() => SendPcmToAudioSocket(callId, pcmData));
+    }
 
     private void SendPcmToAudioSocket(
         string callId, byte[] pcmData)
     {
-        ILocalMediaSession? mediaSession = null;
-
-        if (!_mediaSessions.TryGetValue(callId, out mediaSession))
+        if (!_mediaSessions.TryGetValue(callId, out var mediaSession))
         {
             Console.WriteLine(
                 $"[APP-HOSTED SEND] No media session for call {callId}.");
@@ -731,9 +763,8 @@ public class AppHostedMediaService
 
         // PCM 16kHz 16-bit mono: 20ms frames = 640 bytes
         const int frameSize = 640;
-        const long frameDurationTicks = 200000; // 20ms in 100-ns ticks
+        const long frameDurationTicks = 20 * 10000;
         var timestamp = DateTime.UtcNow.Ticks;
-
         var totalFrames = pcmData.Length / frameSize;
 
         Console.WriteLine();
@@ -745,46 +776,50 @@ public class AppHostedMediaService
         Console.WriteLine($"Frames (20ms): {totalFrames}");
         Console.WriteLine("================================================");
 
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
         for (var i = 0; i < totalFrames; i++)
         {
-            var frameData = new byte[frameSize];
-            Buffer.BlockCopy(pcmData, i * frameSize, frameData, 0, frameSize);
-
-            var pinnedHandle =
-                GCHandle.Alloc(frameData, GCHandleType.Pinned);
-
+            var unmanagedBuffer = Marshal.AllocHGlobal(frameSize);
             try
             {
+                Marshal.Copy(pcmData, i * frameSize, unmanagedBuffer, frameSize);
+
+                // Ownership of unmanagedBuffer transfers to AudioSendBuffer.
+                // Media platform calls Dispose later and frees the memory.
                 var buffer = new AudioSendBuffer(
-                    pinnedHandle.AddrOfPinnedObject(),
+                    unmanagedBuffer,
                     frameSize,
                     AudioFormat.Pcm16K,
                     timestamp);
 
+                unmanagedBuffer = IntPtr.Zero;
                 audioSocket.Send(buffer);
             }
             catch (Exception ex)
             {
+                if (unmanagedBuffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(unmanagedBuffer);
+                }
+
                 Console.WriteLine(
                     $"[APP-HOSTED SEND] Frame {i} send error: {ex.Message}");
                 break;
             }
-            finally
-            {
-                pinnedHandle.Free();
-            }
 
             timestamp += frameDurationTicks;
 
-            // Pace at ~20ms per frame to avoid buffer overflow
-            if (i % 50 == 49)
+            var targetMs = (i + 1) * 20;
+            var delayMs = targetMs - (int)stopwatch.ElapsedMilliseconds;
+            if (delayMs > 0)
             {
-                Thread.Sleep(1);
+                Thread.Sleep(delayMs);
             }
         }
 
         Console.WriteLine(
-            $"[APP-HOSTED SEND] Sent {totalFrames} audio frames to Teams.");
+            $"[APP-HOSTED SEND] Sent audio for call {callId}.");
     }
 
     private IPAddress ResolvePublicIp(string serviceFqdn)
