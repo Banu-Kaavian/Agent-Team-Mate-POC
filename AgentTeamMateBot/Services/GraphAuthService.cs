@@ -17,12 +17,15 @@ public class GraphAuthService
     public GraphAuthService(IConfiguration configuration)
     {
         _clientId = configuration["Bot:ClientId"]
+            ?? configuration["ClientId"]
             ?? throw new Exception("Bot:ClientId missing");
 
         _tenantId = configuration["Bot:TenantId"]
+            ?? configuration["TenantId"]
             ?? throw new Exception("Bot:TenantId missing");
 
         _clientSecret = configuration["Bot:ClientSecret"]
+            ?? configuration["ClientSecret"]
             ?? throw new Exception("Bot:ClientSecret missing");
 
         _client = ConfidentialClientApplicationBuilder

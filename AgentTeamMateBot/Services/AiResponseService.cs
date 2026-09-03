@@ -20,6 +20,7 @@ public class AiResponseService
         _configuration = configuration;
         _meetingContextService = meetingContextService;
         _httpClient = new HttpClient();
+        _httpClient.Timeout = TimeSpan.FromSeconds(20);
     }
 
     public async Task<string?> GetResponseAsync(
@@ -33,8 +34,10 @@ public class AiResponseService
             return null;
 
         var endpoint = _configuration["AzureOpenAI:Endpoint"];
-        var deployment = _configuration["AzureOpenAI:Deployment"];
-        var apiKey = _configuration["AzureOpenAI:ApiKey"];
+        var deployment = _configuration["AzureOpenAI:Deployment"]
+            ?? _configuration["OPENAI_MODEL"];
+        var apiKey = _configuration["AzureOpenAI:ApiKey"]
+            ?? _configuration["OPENAI_API_KEY"];
 
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new Exception("AzureOpenAI:Endpoint missing");
@@ -62,37 +65,33 @@ public class AiResponseService
         var history =
             conversation.Snapshot();
 
-        var meetingContext =
-            await GetMeetingContextSafelyAsync(
-                callId);
-
+        // Skip Graph transcript lookup on the spoken path. It can take minutes
+        // and blocks Azure OpenAI. Live transcript from this call is enough.
         var liveTranscript =
             _meetingContextService.GetLiveTranscript(
                 callId);
 
-        var input =
-            history
-                .Select(message => new
-                {
-                    role = message.Role,
-                    content = message.Content
-                })
-                .ToArray();
+        var apiVersion =
+            _configuration["AzureOpenAI:ApiVersion"]
+            ?? "2025-01-01-preview";
 
         var url =
-            $"{endpoint.TrimEnd('/')}/openai/v1/responses";
+            $"{endpoint.TrimEnd('/')}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
 
+        var messages =
+            BuildMessages(
+                history,
+                meetingContext: null,
+                liveTranscript,
+                userMessage);
+
+        // gpt-5-mini spends tokens on hidden reasoning. A small
+        // max_completion_tokens budget often finishes with empty content.
         var payload = new
         {
-            model = deployment,
-
-            instructions =
-                BuildInstructions(
-                    meetingContext,
-                    liveTranscript,
-                    userMessage),
-
-            input
+            messages,
+            max_completion_tokens = 1024,
+            reasoning_effort = "minimal"
         };
 
         var json =
@@ -120,9 +119,20 @@ public class AiResponseService
         Console.WriteLine(userMessage);
         Console.WriteLine("================================================");
 
-        using var response =
-            await _httpClient.SendAsync(request);
+        HttpResponseMessage response;
+        try
+        {
+            response =
+                await _httpClient.SendAsync(request);
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Azure OpenAI request failed. {ex.Message}");
+            throw;
+        }
 
+        using (response)
+        {
         var body =
             await response.Content.ReadAsStringAsync();
 
@@ -136,6 +146,9 @@ public class AiResponseService
             Console.WriteLine(body);
             Console.WriteLine("================================================");
 
+            BotLog.Info(
+                $"Error: Azure OpenAI {(int)response.StatusCode}. {TrimForLog(body)}");
+
             return null;
         }
 
@@ -143,48 +156,127 @@ public class AiResponseService
             JsonDocument.Parse(body);
 
         if (!document.RootElement.TryGetProperty(
-                "output",
-                out var output))
+                "choices",
+                out var choices) ||
+            choices.ValueKind != JsonValueKind.Array)
         {
+            BotLog.Info("Error: Azure OpenAI response had no choices.");
             return null;
         }
 
-        foreach (var item in output.EnumerateArray())
+        foreach (var choice in choices.EnumerateArray())
         {
-            if (!item.TryGetProperty(
-                    "content",
-                    out var content))
+            var answer = ExtractMessageText(choice);
+
+            if (string.IsNullOrWhiteSpace(answer))
                 continue;
 
-            foreach (var part in content.EnumerateArray())
-            {
-                if (!part.TryGetProperty(
-                        "text",
-                        out var textElement))
-                    continue;
+            conversation.Add(
+                "assistant",
+                answer);
 
-                var answer =
-                    textElement.GetString();
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" AI RESPONSE");
+            Console.WriteLine("================================================");
+            Console.WriteLine(answer);
+            Console.WriteLine("================================================");
 
-                if (string.IsNullOrWhiteSpace(answer))
-                    continue;
+            return answer;
+        }
 
-                conversation.Add(
-                    "assistant",
-                    answer);
+        BotLog.Info(
+            $"Error: Azure OpenAI returned no text. {DescribeEmptyResponse(document.RootElement)}");
+        return null;
+        }
+    }
 
-                Console.WriteLine();
-                Console.WriteLine("================================================");
-                Console.WriteLine(" AI RESPONSE");
-                Console.WriteLine("================================================");
-                Console.WriteLine(answer);
-                Console.WriteLine("================================================");
+    private static string? ExtractMessageText(JsonElement choice)
+    {
+        if (!choice.TryGetProperty("message", out var message))
+            return null;
 
-                return answer;
-            }
+        if (message.TryGetProperty("content", out var content))
+        {
+            var text = ReadContent(content);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+
+        if (message.TryGetProperty("refusal", out var refusal))
+        {
+            var text = refusal.GetString();
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
         }
 
         return null;
+    }
+
+    private static string? ReadContent(JsonElement content)
+    {
+        if (content.ValueKind == JsonValueKind.String)
+            return content.GetString();
+
+        if (content.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var builder = new StringBuilder();
+        foreach (var part in content.EnumerateArray())
+        {
+            if (part.ValueKind == JsonValueKind.String)
+            {
+                builder.Append(part.GetString());
+                continue;
+            }
+
+            if (part.TryGetProperty("text", out var text))
+                builder.Append(text.GetString());
+        }
+
+        var combined = builder.ToString().Trim();
+        return string.IsNullOrWhiteSpace(combined) ? null : combined;
+    }
+
+    private static string DescribeEmptyResponse(JsonElement root)
+    {
+        var finishReason = "unknown";
+        if (root.TryGetProperty("choices", out var choices) &&
+            choices.ValueKind == JsonValueKind.Array &&
+            choices.GetArrayLength() > 0 &&
+            choices[0].TryGetProperty("finish_reason", out var reason))
+        {
+            finishReason = reason.GetString() ?? finishReason;
+        }
+
+        var completionTokens = "?";
+        var reasoningTokens = "?";
+        if (root.TryGetProperty("usage", out var usage))
+        {
+            if (usage.TryGetProperty("completion_tokens", out var completion))
+                completionTokens = completion.ToString();
+
+            if (usage.TryGetProperty("completion_tokens_details", out var details) &&
+                details.TryGetProperty("reasoning_tokens", out var reasoning))
+            {
+                reasoningTokens = reasoning.ToString();
+            }
+        }
+
+        return $"finish_reason={finishReason}, completion_tokens={completionTokens}, reasoning_tokens={reasoningTokens}.";
+    }
+
+    private static string TrimForLog(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "(empty body)";
+        }
+
+        var trimmed = body.Replace('\n', ' ').Trim();
+        return trimmed.Length <= 240
+            ? trimmed
+            : trimmed[..240];
     }
 
     public void ClearConversation(
@@ -225,135 +317,73 @@ public class AiResponseService
         }
     }
 
+    private static object[] BuildMessages(
+        IReadOnlyList<ConversationMessage> history,
+        string? meetingContext,
+        string? liveTranscript,
+        string currentQuestion)
+    {
+        var messages =
+            new List<object>
+            {
+                new
+                {
+                    role = "system",
+                    content =
+                        BuildInstructions(
+                            meetingContext,
+                            liveTranscript,
+                            currentQuestion)
+                }
+            };
+
+        foreach (var message in history)
+        {
+            messages.Add(
+                new
+                {
+                    role = message.Role,
+                    content = message.Content
+                });
+        }
+
+        return messages.ToArray();
+    }
+
     private static string BuildInstructions(
         string? meetingContext,
         string? liveTranscript,
         string currentQuestion)
     {
         var builder = new StringBuilder();
+        var now = DateTime.Now;
 
         builder.Append(
-            "You are Agent Team Mate, a live technical teammate participating in a Microsoft Teams meeting. ");
-
+            "You are Agent Nova in a live Microsoft Teams meeting. ");
         builder.Append(
-            "Answer the user's current question directly and briefly because the response will be spoken aloud. ");
-
+            "Answer in one or two short spoken sentences. No markdown, lists, URLs, or symbols. ");
         builder.Append(
-            "Do not repeatedly restate the complete plan from previous turns. ");
-
+            "Start with the answer. Do not invent meeting facts. ");
         builder.Append(
-            "Do not repeatedly ask for confirmation after the user has already confirmed. ");
-
-        builder.Append(
-            "If the user says yes, proceed, start, go ahead, just proceed, no more questions, or equivalent, " +
-            "stop asking follow-up questions unless a genuinely required piece of information prevents answering. ");
-
-        builder.Append(
-            "Do not ask \"Should I proceed?\", \"Want me to start?\", or \"Any last-minute details?\" after the user has already confirmed. ");
-
-        builder.Append(
-            "If the request has been answered, end naturally. Do not automatically add a closing question. ");
-
-        builder.Append(
-            "Never claim that work will continue after this response. ");
-
-        builder.Append(
-            "Do not say you will work on it later, deliver it later, deliver it tomorrow, " +
-            "deliver it in two business days, message when ready, or start now and get back to the user. ");
-
-        builder.Append(
-            "This application has no background job that can perform future work. ");
-
-        builder.Append(
-            "Never invent delivery timelines. ");
-
-        builder.Append(
-            "Never claim to have performed an external action unless this application actually has a connected tool that performed it. ");
-
-        builder.Append(
-            "Do not claim you validated SAP documentation, retrieved a website, generated a PDF, sent a message, " +
-            "or completed any other external action unless such a tool actually ran. ");
-
-        builder.Append(
-            "If the user asks for something this application cannot execute, clearly say what you can do in this conversation. ");
-
-        builder.Append(
-            "For example: you can draft a wireframe specification in this conversation, " +
-            "but the current Agent Team Mate implementation does not have a PDF-generation tool connected. ");
-
-        builder.Append(
-            "Distinguish between answering or reasoning using model knowledge, " +
-            "information from meeting context, and an actual external action or tool. ");
-
-        builder.Append(
-            "Never present model reasoning as an external action. ");
-
-        builder.Append(
-            "Use the supplied meeting transcript when answering questions about the discussion. ");
-
-        builder.Append(
-            "The live meeting transcript is the current in-meeting speech captured during this call. ");
-
-        builder.Append(
-            "If a Graph meeting transcript is also supplied, treat it as a separate source. ");
-
-        builder.Append(
-            "Do not claim something was discussed unless it appears in the supplied meeting transcript or Graph meeting transcript. ");
-
-        builder.Append(
-            "If the meeting context does not contain the requested information, say that clearly. ");
-
-        builder.Append(
-            "Never invent a meeting decision, participant statement, requirement, name, date, or conclusion. ");
-
-        builder.Append(
-            "When speaker names are available in the meeting transcript, preserve those names and use them when relevant. ");
-
-        builder.Append(
-            "If speaker identity is not available in the transcript, do not guess who said something. ");
-
-        builder.Append(
-            "Clearly distinguish between what was discussed in the meeting and what you are recommending from technical knowledge. ");
-
-        builder.Append(
-            "For SAP-related questions, you may use model knowledge and prefer SAP standard functionality over custom development, " +
-            "but say it is based on model knowledge, not a live documentation lookup. ");
-
-        builder.Append(
-            "Recommend custom RAP, custom OData, custom ABAP, or other custom development only when standard functionality is insufficient. ");
-
-        builder.Append(
-            "Keep spoken responses concise and natural.");
+            $"The current local date and time is {now:dddd, MMMM d, yyyy} at {now:h:mm tt}.");
 
         builder.AppendLine();
         builder.AppendLine();
-        builder.AppendLine("Graph meeting transcript:");
+        builder.Append("Meeting transcript: ");
+        builder.AppendLine(
+            string.IsNullOrWhiteSpace(liveTranscript)
+                ? "None yet."
+                : liveTranscript);
 
-        if (string.IsNullOrWhiteSpace(meetingContext))
+        if (!string.IsNullOrWhiteSpace(meetingContext))
         {
-            builder.AppendLine(
-                "No Graph meeting transcript is available.");
-        }
-        else
-        {
+            builder.AppendLine();
+            builder.Append("Graph transcript: ");
             builder.AppendLine(meetingContext);
         }
 
         builder.AppendLine();
-        builder.AppendLine("Meeting transcript:");
-
-        if (string.IsNullOrWhiteSpace(liveTranscript))
-        {
-            builder.Append(
-                "No live meeting transcript is available yet.");
-        }
-        else
-        {
-            builder.AppendLine(liveTranscript);
-        }
-
-        builder.AppendLine();
-        builder.AppendLine("Current question:");
+        builder.Append("Current question: ");
         builder.Append(currentQuestion);
 
         return builder.ToString();

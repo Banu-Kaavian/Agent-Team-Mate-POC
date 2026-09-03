@@ -1,17 +1,23 @@
-﻿using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography.X509Certificates;
 using AgentTeamMateBot.Media;
 using AgentTeamMateBot.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// User secrets are Development-only by default. Load them whenever present
+// so `dotnet run` works even if ASPNETCORE_ENVIRONMENT is Production.
+builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);
+BotLog.Configure(builder.Configuration);
+
 Console.WriteLine($"Environment : {builder.Environment.EnvironmentName}");
-Console.WriteLine($"ClientId : {builder.Configuration["Bot:ClientId"]}");
-Console.WriteLine($"TenantId : {builder.Configuration["Bot:TenantId"]}");
+Console.WriteLine($"ClientId : {builder.Configuration["Bot:ClientId"] ?? builder.Configuration["ClientId"]}");
+Console.WriteLine($"TenantId : {builder.Configuration["Bot:TenantId"] ?? builder.Configuration["TenantId"]}");
 
 Console.WriteLine();
 Console.WriteLine("================================================");
 Console.WriteLine("        AGENT TEAM MATE BOT STARTING");
 Console.WriteLine("================================================");
+
 
 // ================================================================
 // KESTREL - LOCAL HTTP + PUBLIC HTTPS
@@ -113,6 +119,10 @@ Console.WriteLine(
 // ================================================================
 // INITIALIZE GRAPH COMMUNICATIONS CLIENT
 // ================================================================
+
+_ = app.Services
+    .GetRequiredService<SpeechSynthesisService>()
+    .WarmupAsync();
 
 app.Services
     .GetRequiredService<MediaSessionService>()
@@ -450,6 +460,12 @@ Console.WriteLine($" Callback : {callbackUri}");
 Console.WriteLine(" Media    : SERVICE HOSTED  POST /api/join");
 Console.WriteLine(" Phase 2  : APP HOSTED      POST /api/join-apphosted");
 Console.WriteLine("================================================");
+
+BotLog.Info("Ready. Waiting for a meeting join.");
+if (!BotLog.Verbose)
+{
+    BotLog.Info("Debug logs are off. Set Logging:Verbose to true in appsettings.json to turn them on.");
+}
 
 app.Run();
 

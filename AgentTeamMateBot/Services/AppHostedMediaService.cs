@@ -21,12 +21,18 @@ public class AppHostedMediaService
     private readonly GraphAuthService _graphAuthService;
     private readonly AudioHandler _audioHandler;
     private readonly SpeechRecognitionService _speechService;
+    private readonly AiResponseService _aiResponseService;
+    private readonly SpeechSynthesisService _speechSynthesisService;
+    private readonly MeetingContextService _meetingContextService;
     private readonly IBotMediaLogger _mediaLogger;
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
     private readonly ConcurrentDictionary<string, ILocalMediaSession> _mediaSessions = new();
     private readonly ConcurrentDictionary<Guid, AudioSocketBinding> _audioBindings = new();
     private readonly object _initLock = new();
+
+    // Track the active call ID for the continuous recognizer callback
+    private string? _activeCallId;
 
     private IGraphLogger? _graphLogger;
     private ICommunicationsClient? _client;
@@ -39,13 +45,22 @@ public class AppHostedMediaService
         GraphAuthService graphAuthService,
         AudioHandler audioHandler,
         SpeechRecognitionService speechService,
+        AiResponseService aiResponseService,
+        SpeechSynthesisService speechSynthesisService,
+        MeetingContextService meetingContextService,
         IBotMediaLogger mediaLogger)
     {
         _configuration = configuration;
         _graphAuthService = graphAuthService;
         _audioHandler = audioHandler;
         _speechService = speechService;
+        _aiResponseService = aiResponseService;
+        _speechSynthesisService = speechSynthesisService;
+        _meetingContextService = meetingContextService;
         _mediaLogger = mediaLogger;
+
+        // Subscribe to continuous speech recognition events
+        _speechService.OnSpeechRecognized += OnLiveSpeechRecognized;
     }
 
     public bool IsInitialized => _initialized && _mediaPlatformReady;
@@ -243,6 +258,7 @@ public class AppHostedMediaService
 
             var statefulCall = await _client.Calls().AddAsync(call, mediaSession);
             audioBinding.CallId = statefulCall.Id;
+            _activeCallId = statefulCall.Id;
             TrackCall(statefulCall, mediaSession, audioBinding);
 
             Console.WriteLine($"Call ID    : {statefulCall.Id}");
@@ -497,6 +513,217 @@ public class AppHostedMediaService
         {
             buffer.Dispose();
         }
+    }
+
+    // ============================================================
+    // LIVE SPEECH → AGENT NOVA → AI → TTS → AUDIOSOCKET
+    // ============================================================
+
+    private void OnLiveSpeechRecognized(string recognizedText)
+    {
+        var callId = _activeCallId;
+        if (string.IsNullOrWhiteSpace(callId))
+        {
+            return;
+        }
+
+        _meetingContextService.AppendLiveTranscript(
+            callId, recognizedText);
+
+        if (!WakeWordDetector.IsAgentInvocation(recognizedText))
+        {
+            return;
+        }
+
+        var question =
+            WakeWordDetector.RemoveActivationPhrase(recognizedText);
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" [APP-HOSTED] AGENT NOVA INVOCATION DETECTED");
+        Console.WriteLine("================================================");
+        Console.WriteLine($"Speech   : {recognizedText}");
+        Console.WriteLine($"Question : {question}");
+        Console.WriteLine("================================================");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var aiResponse =
+                    await _aiResponseService
+                        .GetResponseAsync(callId, question);
+
+                if (string.IsNullOrWhiteSpace(aiResponse))
+                {
+                    Console.WriteLine("[APP-HOSTED AI] No response received.");
+                    return;
+                }
+
+                Console.WriteLine();
+                Console.WriteLine("================================================");
+                Console.WriteLine(" [APP-HOSTED] AGENT RESPONSE");
+                Console.WriteLine("================================================");
+                Console.WriteLine(aiResponse);
+                Console.WriteLine("================================================");
+
+                var pcmAudio =
+                    await SynthesizeSpeechToPcmAsync(aiResponse);
+
+                if (pcmAudio == null || pcmAudio.Length == 0)
+                {
+                    Console.WriteLine("[APP-HOSTED TTS] No audio generated.");
+                    return;
+                }
+
+                SendPcmToAudioSocket(callId, pcmAudio);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[APP-HOSTED] AI/TTS pipeline error: {ex.Message}");
+            }
+        });
+    }
+
+    // ============================================================
+    // SYNTHESIZE SPEECH TO RAW PCM (16kHz 16-bit mono)
+    // ============================================================
+
+    private async Task<byte[]?> SynthesizeSpeechToPcmAsync(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var key = _configuration["Speech:Key"]
+            ?? _configuration["AZURE_SPEECH_KEY"];
+
+        var region = _configuration["Speech:Region"]
+            ?? _configuration["AZURE_SPEECH_REGION"];
+
+        var voice = _configuration["Speech:Voice"]
+            ?? "en-US-AvaMultilingualNeural";
+
+        if (string.IsNullOrWhiteSpace(key) ||
+            string.IsNullOrWhiteSpace(region))
+        {
+            Console.WriteLine("[APP-HOSTED TTS] Speech key or region missing.");
+            return null;
+        }
+
+        var speechConfig =
+            Microsoft.CognitiveServices.Speech.SpeechConfig
+                .FromSubscription(key, region);
+
+        speechConfig.SpeechSynthesisVoiceName = voice;
+        speechConfig.SetSpeechSynthesisOutputFormat(
+            Microsoft.CognitiveServices.Speech.SpeechSynthesisOutputFormat
+                .Raw16Khz16BitMonoPcm);
+
+        using var synthesizer =
+            new Microsoft.CognitiveServices.Speech.SpeechSynthesizer(
+                speechConfig, null);
+
+        var result = await synthesizer.SpeakTextAsync(text);
+
+        if (result.Reason ==
+            Microsoft.CognitiveServices.Speech.ResultReason
+                .SynthesizingAudioCompleted)
+        {
+            Console.WriteLine(
+                $"[APP-HOSTED TTS] Synthesized {result.AudioData.Length} bytes of raw PCM.");
+
+            return result.AudioData;
+        }
+
+        Console.WriteLine(
+            $"[APP-HOSTED TTS] Synthesis failed: {result.Reason}");
+
+        return null;
+    }
+
+    // ============================================================
+    // SEND RAW PCM FRAMES VIA AUDIOSOCKET
+    // ============================================================
+
+    private void SendPcmToAudioSocket(
+        string callId, byte[] pcmData)
+    {
+        ILocalMediaSession? mediaSession = null;
+
+        if (!_mediaSessions.TryGetValue(callId, out mediaSession))
+        {
+            Console.WriteLine(
+                $"[APP-HOSTED SEND] No media session for call {callId}.");
+            return;
+        }
+
+        var audioSocket = mediaSession.AudioSocket;
+        if (audioSocket == null)
+        {
+            Console.WriteLine(
+                "[APP-HOSTED SEND] AudioSocket is null.");
+            return;
+        }
+
+        // PCM 16kHz 16-bit mono: 20ms frames = 640 bytes
+        const int frameSize = 640;
+        const long frameDurationTicks = 200000; // 20ms in 100-ns ticks
+        var timestamp = DateTime.UtcNow.Ticks;
+
+        var totalFrames = pcmData.Length / frameSize;
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" [APP-HOSTED] SENDING AUDIO TO TEAMS");
+        Console.WriteLine("================================================");
+        Console.WriteLine($"Call ID      : {callId}");
+        Console.WriteLine($"PCM bytes    : {pcmData.Length}");
+        Console.WriteLine($"Frames (20ms): {totalFrames}");
+        Console.WriteLine("================================================");
+
+        for (var i = 0; i < totalFrames; i++)
+        {
+            var frameData = new byte[frameSize];
+            Buffer.BlockCopy(pcmData, i * frameSize, frameData, 0, frameSize);
+
+            var pinnedHandle =
+                GCHandle.Alloc(frameData, GCHandleType.Pinned);
+
+            try
+            {
+                var buffer = new AudioSendBuffer(
+                    pinnedHandle.AddrOfPinnedObject(),
+                    frameSize,
+                    AudioFormat.Pcm16K,
+                    timestamp);
+
+                audioSocket.Send(buffer);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[APP-HOSTED SEND] Frame {i} send error: {ex.Message}");
+                break;
+            }
+            finally
+            {
+                pinnedHandle.Free();
+            }
+
+            timestamp += frameDurationTicks;
+
+            // Pace at ~20ms per frame to avoid buffer overflow
+            if (i % 50 == 49)
+            {
+                Thread.Sleep(1);
+            }
+        }
+
+        Console.WriteLine(
+            $"[APP-HOSTED SEND] Sent {totalFrames} audio frames to Teams.");
     }
 
     private IPAddress ResolvePublicIp(string serviceFqdn)
