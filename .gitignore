@@ -6,6 +6,10 @@
 # dotenv files
 .env
 
+# Local secrets / machine overrides (do not commit)
+**/appsettings.Local.json
+**/appsettings.*.Local.json
+
 # User-specific files
 *.rsuser
 *.suo

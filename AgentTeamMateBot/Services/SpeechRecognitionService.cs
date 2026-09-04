@@ -23,6 +23,8 @@ public class SpeechRecognitionService
     private PushAudioInputStream? _livePushStream;
     private bool _liveStarted;
 
+    public event Action<string>? OnSpeechRecognized;
+
     // ============================================================
     // PHASE 2: CONTINUOUS LIVE PCM FROM AUDIOSOCKET
     // RecognizeRecordingAsync below is unchanged for service-hosted.
@@ -43,10 +45,12 @@ public class SpeechRecognitionService
         try
         {
             var key =
-                _configuration["Speech:Key"];
+                _configuration["Speech:Key"]
+                ?? _configuration["AZURE_SPEECH_KEY"];
 
             var region =
-                _configuration["Speech:Region"];
+                _configuration["Speech:Region"]
+                ?? _configuration["AZURE_SPEECH_REGION"];
 
             if (string.IsNullOrWhiteSpace(key))
             {
@@ -107,6 +111,16 @@ public class SpeechRecognitionService
                         Console.WriteLine("================================================");
                         Console.WriteLine(e.Result.Text);
                         Console.WriteLine("================================================");
+
+                        try
+                        {
+                            OnSpeechRecognized?.Invoke(e.Result.Text);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine(
+                                $"[LIVE SPEECH] Callback error: {ex.Message}");
+                        }
                     }
                 };
 
@@ -191,10 +205,12 @@ public class SpeechRecognitionService
         }
 
         var key =
-            _configuration["Speech:Key"];
+            _configuration["Speech:Key"]
+            ?? _configuration["AZURE_SPEECH_KEY"];
 
         var region =
-            _configuration["Speech:Region"];
+            _configuration["Speech:Region"]
+            ?? _configuration["AZURE_SPEECH_REGION"];
 
         if (string.IsNullOrWhiteSpace(
                 key))
@@ -221,6 +237,12 @@ public class SpeechRecognitionService
                 tempFile,
                 recordingBytes);
 
+            TrySaveDebugRecording(
+                recordingBytes);
+
+            var wav =
+                AnalyzeWav(recordingBytes);
+
             Console.WriteLine();
             Console.WriteLine("================================================");
             Console.WriteLine(" AZURE SPEECH RECOGNITION");
@@ -232,13 +254,24 @@ public class SpeechRecognitionService
             Console.WriteLine(
                 $"Speech region : {region}");
 
+            Console.WriteLine(
+                $"WAV format    : {wav.SampleRate} Hz / {wav.BitsPerSample}-bit / {wav.Channels} ch");
+
+            Console.WriteLine(
+                $"PCM energy    : rms={wav.Rms:F1} peak={wav.Peak}");
+
+            if (wav.Rms < 50)
+            {
+                Console.WriteLine(
+                    "WARNING: Recording is nearly silent. Unmute your Teams mic,");
+                Console.WriteLine(
+                    "speak closer to the microphone, and say 'Agent Nova' clearly.");
+            }
+
             var speechConfig =
-                SpeechConfig.FromSubscription(
+                CreateRecognitionConfig(
                     key,
                     region);
-
-            speechConfig.SpeechRecognitionLanguage =
-                "en-US";
 
             using var audioConfig =
                 AudioConfig.FromWavFileInput(
@@ -255,6 +288,23 @@ public class SpeechRecognitionService
             var result =
                 await recognizer
                     .RecognizeOnceAsync();
+
+            if (result.Reason == ResultReason.NoMatch &&
+                wav.Rms >= 50)
+            {
+                Console.WriteLine(
+                    "[SPEECH] WAV recognize returned NoMatch. Retrying raw PCM push stream...");
+
+                var retry =
+                    await RecognizePcmPushAsync(
+                        speechConfig,
+                        wav);
+
+                if (!string.IsNullOrWhiteSpace(retry))
+                {
+                    return retry;
+                }
+            }
 
             // ============================================================
             // SUCCESS
@@ -370,5 +420,216 @@ public class SpeechRecognitionService
                     $"[SPEECH] Could not delete temp file: {ex.Message}");
             }
         }
+    }
+
+    private static SpeechConfig CreateRecognitionConfig(
+        string key,
+        string region)
+    {
+        var speechConfig =
+            SpeechConfig.FromSubscription(
+                key,
+                region);
+
+        speechConfig.SpeechRecognitionLanguage =
+            "en-US";
+
+        speechConfig.SetProperty(
+            PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+            "15000");
+
+        speechConfig.SetProperty(
+            PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+            "1500");
+
+        return speechConfig;
+    }
+
+    private static async Task<string?> RecognizePcmPushAsync(
+        SpeechConfig speechConfig,
+        WavAnalysis wav)
+    {
+        if (wav.Pcm.Length == 0)
+        {
+            return null;
+        }
+
+        var format =
+            AudioStreamFormat.GetWaveFormatPCM(
+                (uint)wav.SampleRate,
+                (byte)wav.BitsPerSample,
+                (byte)wav.Channels);
+
+        using var pushStream =
+            AudioInputStream.CreatePushStream(
+                format);
+
+        using var audioConfig =
+            AudioConfig.FromStreamInput(
+                pushStream);
+
+        using var recognizer =
+            new SpeechRecognizer(
+                speechConfig,
+                audioConfig);
+
+        var recognizeTask =
+            recognizer.RecognizeOnceAsync();
+
+        pushStream.Write(wav.Pcm);
+        pushStream.Close();
+
+        var result =
+            await recognizeTask;
+
+        if (result.Reason == ResultReason.RecognizedSpeech &&
+            !string.IsNullOrWhiteSpace(result.Text))
+        {
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" SPEECH RECOGNIZED");
+            Console.WriteLine("================================================");
+            Console.WriteLine(result.Text);
+            Console.WriteLine("================================================");
+            return result.Text;
+        }
+
+        Console.WriteLine(
+            $"[SPEECH] PCM retry result: {result.Reason}");
+
+        return null;
+    }
+
+    private void TrySaveDebugRecording(
+        byte[] recordingBytes)
+    {
+        try
+        {
+            var debugDirectory =
+                Path.Combine(
+                    AppContext.BaseDirectory,
+                    "TempAudio");
+
+            Directory.CreateDirectory(debugDirectory);
+
+            File.WriteAllBytes(
+                Path.Combine(debugDirectory, "last-recording.wav"),
+                recordingBytes);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[SPEECH] Could not save debug recording: {ex.Message}");
+        }
+    }
+
+    private readonly record struct WavAnalysis(
+        int SampleRate,
+        int BitsPerSample,
+        int Channels,
+        byte[] Pcm,
+        double Rms,
+        int Peak);
+
+    private static WavAnalysis AnalyzeWav(
+        byte[] bytes)
+    {
+        if (bytes.Length < 44 ||
+            bytes[0] != (byte)'R' ||
+            bytes[1] != (byte)'I')
+        {
+            return MeasurePcm(
+                bytes,
+                16000,
+                16,
+                1,
+                0);
+        }
+
+        var channels =
+            BitConverter.ToInt16(bytes, 22);
+
+        var sampleRate =
+            BitConverter.ToInt32(bytes, 24);
+
+        var bits =
+            BitConverter.ToInt16(bytes, 34);
+
+        var dataOffset = 44;
+        for (var i = 12; i < bytes.Length - 8; i++)
+        {
+            if (bytes[i] == (byte)'d' &&
+                bytes[i + 1] == (byte)'a' &&
+                bytes[i + 2] == (byte)'t' &&
+                bytes[i + 3] == (byte)'a')
+            {
+                dataOffset = i + 8;
+                break;
+            }
+        }
+
+        return MeasurePcm(
+            bytes,
+            sampleRate > 0 ? sampleRate : 16000,
+            bits > 0 ? bits : 16,
+            channels > 0 ? channels : 1,
+            dataOffset);
+    }
+
+    private static WavAnalysis MeasurePcm(
+        byte[] bytes,
+        int sampleRate,
+        int bits,
+        int channels,
+        int offset)
+    {
+        if (offset >= bytes.Length)
+        {
+            return new WavAnalysis(
+                sampleRate,
+                bits,
+                channels,
+                Array.Empty<byte>(),
+                0,
+                0);
+        }
+
+        var pcm =
+            bytes[offset..];
+
+        long sumSquares = 0;
+        var peak = 0;
+        var samples = 0;
+
+        if (bits == 16)
+        {
+            for (var i = 0; i + 1 < pcm.Length; i += 2)
+            {
+                var sample =
+                    Math.Abs(
+                        BitConverter.ToInt16(pcm, i));
+
+                sumSquares += (long)sample * sample;
+                if (sample > peak)
+                {
+                    peak = sample;
+                }
+
+                samples++;
+            }
+        }
+
+        var rms =
+            samples == 0
+                ? 0
+                : Math.Sqrt(sumSquares / (double)samples);
+
+        return new WavAnalysis(
+            sampleRate,
+            bits,
+            channels,
+            pcm,
+            rms,
+            peak);
     }
 }

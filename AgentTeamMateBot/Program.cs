@@ -1,17 +1,30 @@
-﻿using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography.X509Certificates;
 using AgentTeamMateBot.Media;
 using AgentTeamMateBot.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Machine-local secrets/overrides. Keep real keys in appsettings.Local.json
+// on the VM (gitignored). Survives PowerShell restarts.
+builder.Configuration.AddJsonFile(
+    "appsettings.Local.json",
+    optional: true,
+    reloadOnChange: true);
+
+// User secrets are Development-only by default. Load them whenever present
+// so `dotnet run` works even if ASPNETCORE_ENVIRONMENT is Production.
+builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);
+BotLog.Configure(builder.Configuration);
+
 Console.WriteLine($"Environment : {builder.Environment.EnvironmentName}");
-Console.WriteLine($"ClientId : {builder.Configuration["Bot:ClientId"]}");
-Console.WriteLine($"TenantId : {builder.Configuration["Bot:TenantId"]}");
+Console.WriteLine($"ClientId : {builder.Configuration["Bot:ClientId"] ?? builder.Configuration["ClientId"]}");
+Console.WriteLine($"TenantId : {builder.Configuration["Bot:TenantId"] ?? builder.Configuration["TenantId"]}");
 
 Console.WriteLine();
 Console.WriteLine("================================================");
 Console.WriteLine("        AGENT TEAM MATE BOT STARTING");
 Console.WriteLine("================================================");
+
 
 // ================================================================
 // KESTREL - LOCAL HTTP + PUBLIC HTTPS
@@ -79,6 +92,7 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddHttpClient();
 
 builder.Services.AddSingleton<SpeechSynthesisService>();
+builder.Services.AddSingleton<MeetingContextService>();
 builder.Services.AddSingleton<AiResponseService>();
 builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
 builder.Services.AddSingleton<GraphAuthService>();
@@ -113,13 +127,17 @@ Console.WriteLine(
 // INITIALIZE GRAPH COMMUNICATIONS CLIENT
 // ================================================================
 
+_ = app.Services
+    .GetRequiredService<SpeechSynthesisService>()
+    .WarmupAsync();
+
 app.Services
     .GetRequiredService<MediaSessionService>()
     .Initialize();
 
-app.Services
-    .GetRequiredService<AppHostedMediaService>()
-    .TryInitialize();
+var appHostedMedia =
+    app.Services.GetRequiredService<AppHostedMediaService>();
+appHostedMedia.TryInitialize();
 
 // ================================================================
 // HEALTH CHECK
@@ -127,13 +145,15 @@ app.Services
 
 app.MapGet(
     "/",
-    () =>
+    (AppHostedMediaService appHosted) =>
         Results.Ok(
             new
             {
                 Application = "Agent Team Mate",
                 Status = "Running",
-                Time = DateTime.UtcNow
+                Time = DateTime.UtcNow,
+                MediaPlatform = appHosted.IsInitialized ? "ready" : "failed",
+                MediaPlatformError = appHosted.InitError
             }));
 
 // ================================================================
@@ -321,7 +341,9 @@ app.MapPost(
                 await mediaSessionService
                     .JoinMeetingAsync(
                         request.MeetingId,
-                        request.Passcode);
+                        request.Passcode,
+                        request.OrganizerUserId,
+                        request.JoinWebUrl);
 
             Console.WriteLine();
             Console.WriteLine(
@@ -448,6 +470,22 @@ Console.WriteLine(" Media    : SERVICE HOSTED  POST /api/join");
 Console.WriteLine(" Phase 2  : APP HOSTED      POST /api/join-apphosted");
 Console.WriteLine("================================================");
 
+BotLog.Info("Ready. Waiting for a meeting join.");
+if (appHostedMedia.IsInitialized)
+{
+    BotLog.Info("App-hosted join is available: POST /api/join-apphosted");
+}
+else
+{
+    BotLog.Info(
+        $"App-hosted join is BLOCKED: {appHostedMedia.InitError ?? "MediaPlatform was not initialized"}");
+}
+
+if (!BotLog.Verbose)
+{
+    BotLog.Info("Debug logs are off. Set Logging:Verbose to true in appsettings.json to turn them on.");
+}
+
 app.Run();
 
 // ================================================================
@@ -456,5 +494,7 @@ app.Run();
 
 public record JoinRequest(
     string MeetingId,
-    string? Passcode
+    string? Passcode,
+    string? OrganizerUserId = null,
+    string? JoinWebUrl = null
 );

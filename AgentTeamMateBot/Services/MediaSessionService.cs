@@ -21,6 +21,7 @@ public class MediaSessionService
     private readonly SpeechRecognitionService _speechService;
     private readonly AiResponseService _aiResponseService;
     private readonly SpeechSynthesisService _speechSynthesisService;
+    private readonly MeetingContextService _meetingContextService;
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
     private readonly ConcurrentDictionary<string, byte> _recordingStarted = new();
@@ -42,7 +43,8 @@ public class MediaSessionService
         AudioHandler audioHandler,
         SpeechRecognitionService speechService,
         AiResponseService aiResponseService,
-        SpeechSynthesisService speechSynthesisService)
+        SpeechSynthesisService speechSynthesisService,
+        MeetingContextService meetingContextService)
     {
         _configuration = configuration;
         _graphAuthService = graphAuthService;
@@ -50,6 +52,7 @@ public class MediaSessionService
         _speechService = speechService;
         _aiResponseService = aiResponseService;
         _speechSynthesisService = speechSynthesisService;
+        _meetingContextService = meetingContextService;
     }
 
     public ICommunicationsClient? Client => _client;
@@ -169,7 +172,9 @@ public class MediaSessionService
 
     public async Task<ICall> JoinMeetingAsync(
         string meetingId,
-        string? passcode)
+        string? passcode,
+        string? organizerUserId = null,
+        string? joinWebUrl = null)
     {
         if (!_initialized ||
             _client == null)
@@ -322,6 +327,17 @@ public class MediaSessionService
             TrackCall(
                 statefulCall);
 
+            _meetingContextService.RegisterCall(
+                statefulCall.Id,
+                tenantId,
+                normalizedMeetingId,
+                organizerUserId,
+                joinWebUrl);
+
+            _meetingContextService.EnrichFromCallResource(
+                statefulCall.Id,
+                statefulCall.Resource);
+
             Console.WriteLine(
                 $"Call ID : {statefulCall.Id}");
 
@@ -334,6 +350,8 @@ public class MediaSessionService
             Console.WriteLine();
             Console.WriteLine(
                 "JOIN REQUEST SENT TO MICROSOFT GRAPH");
+
+            BotLog.Info($"Joined meeting {normalizedMeetingId}.");
 
             Console.WriteLine(
                 $"Call ID : {statefulCall.Id}");
@@ -383,16 +401,6 @@ public class MediaSessionService
             return;
         }
 
-        if (!_recordingStarted.TryAdd(
-                callId,
-                0))
-        {
-            Console.WriteLine(
-                $"[RECORD] recordResponse already started for {callId}");
-
-            return;
-        }
-
         Console.WriteLine();
         Console.WriteLine("================================================");
         Console.WriteLine(" SERVICE-HOSTED CALL ESTABLISHED");
@@ -405,16 +413,44 @@ public class MediaSessionService
             "Media   : Hosted by Microsoft");
 
         Console.WriteLine(
-            "AudioSocket : NOT APPLICABLE");
-
-        Console.WriteLine(
-            "Starting recordResponse...");
-
-        Console.WriteLine(
-            "Speak after the beep.");
+            "Playing welcome prompt, then listening...");
 
         Console.WriteLine(
             "================================================");
+
+        try
+        {
+            BotLog.Info("Playing welcome...");
+
+            var welcomeUrl =
+                await _speechSynthesisService
+                    .SynthesizeSpeechAsync(
+                        "Hi, I am Agent Nova. I am listening. Say your request.");
+
+            if (!string.IsNullOrWhiteSpace(welcomeUrl))
+            {
+                await PlayPromptAsync(
+                    callId,
+                    welcomeUrl);
+
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[WELCOME] Could not play greeting: {ex.Message}");
+        }
+
+        if (!_recordingStarted.TryAdd(
+                callId,
+                0))
+        {
+            Console.WriteLine(
+                $"[RECORD] recordResponse already started for {callId}");
+
+            return;
+        }
 
         await StartRecordResponseAsync(
             callId);
@@ -422,8 +458,8 @@ public class MediaSessionService
 
     // ============================================================
     // NEXT CONVERSATION TURN
-    // Called only after playPrompt has fully completed.
-    // _recordingStarted was cleared in ProcessCompletedRecordingAsync.
+    // Immediately restarts recording. playPrompt will barge in
+    // if an AI response arrives while recording.
     // ============================================================
 
     public async Task StartNextConversationTurnAsync(
@@ -432,6 +468,9 @@ public class MediaSessionService
         if (string.IsNullOrWhiteSpace(
                 callId))
         {
+            Console.WriteLine(
+                "[LISTEN LOOP] Restart skipped: call ID is missing.");
+
             return;
         }
 
@@ -444,7 +483,7 @@ public class MediaSessionService
                 0))
         {
             Console.WriteLine(
-                $"[RECORD] recordResponse already started for {callId}");
+                $"[LISTEN LOOP] recordResponse already active for {callId}, skipping.");
 
             return;
         }
@@ -497,16 +536,20 @@ public class MediaSessionService
                         clientContext,
 
                     maxRecordDurationInSeconds =
-                        15,
+                        _configuration.GetValue(
+                            "Recording:MaxDurationSeconds", 5),
 
                     initialSilenceTimeoutInSeconds =
-                        10,
+                        _configuration.GetValue(
+                            "Recording:InitialSilenceTimeoutSeconds", 600),
 
                     maxSilenceTimeoutInSeconds =
-                        3,
+                        _configuration.GetValue(
+                            "Recording:SilenceTimeoutSeconds", 1),
 
                     playBeep =
-                        true,
+                        _configuration.GetValue(
+                            "Recording:PlayBeep", false),
 
                     stopTones =
                         new[]
@@ -575,8 +618,7 @@ public class MediaSessionService
             Console.WriteLine(
                 "recordResponse started successfully.");
 
-            Console.WriteLine(
-                ">>> SPEAK AFTER THE BEEP <<<");
+            BotLog.Info("Listening...");
 
             Console.WriteLine(
                 "================================================");
@@ -667,101 +709,21 @@ public class MediaSessionService
                 return;
             }
 
-            Console.WriteLine();
-            Console.WriteLine(
-                "Sending recording to Azure Speech...");
-
-            var recognizedText =
-                await _speechService
-                    .RecognizeRecordingAsync(
-                        recordingBytes);
-
-            if (string.IsNullOrWhiteSpace(
-                    recognizedText))
+            _ = Task.Run(async () =>
             {
-                Console.WriteLine();
-                Console.WriteLine(
-                    "[SPEECH] No recognizable speech.");
-
-                return;
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("================================================");
-            Console.WriteLine(" USER SPOKE");
-            Console.WriteLine("================================================");
-
-            Console.WriteLine(
-                recognizedText);
-
-            Console.WriteLine(
-                "================================================");
-
-            Console.WriteLine();
-            Console.WriteLine(
-                "Sending recognized speech to Azure OpenAI...");
-
-            var aiResponse =
-                await _aiResponseService
-                    .GetResponseAsync(
+                try
+                {
+                    await RecognizeAndRespondAsync(
                         callId,
-                        recognizedText);
-
-            if (string.IsNullOrWhiteSpace(
-                    aiResponse))
-            {
-                Console.WriteLine();
-                Console.WriteLine(
-                    "[AI] No response received.");
-
-                return;
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("================================================");
-            Console.WriteLine(" AGENT TEAM MATE RESPONSE");
-            Console.WriteLine("================================================");
-
-            Console.WriteLine(
-                aiResponse);
-
-            Console.WriteLine(
-                "================================================");
-
-            // ============================================================
-            // TTS
-            // ============================================================
-
-            Console.WriteLine();
-            Console.WriteLine(
-                "Generating Agent Team Mate voice...");
-
-            var audioUrl =
-                await _speechSynthesisService
-                    .SynthesizeSpeechAsync(
-                        aiResponse);
-
-            if (string.IsNullOrWhiteSpace(
-                    audioUrl))
-            {
-                Console.WriteLine();
-                Console.WriteLine(
-                    "[TTS] No audio URL generated.");
-
-                return;
-            }
-
-            Console.WriteLine();
-            Console.WriteLine(
-                $"Generated audio URL : {audioUrl}");
-
-            // ============================================================
-            // PLAY RESPONSE INSIDE TEAMS
-            // ============================================================
-
-            await PlayPromptAsync(
-                callId,
-                audioUrl);
+                        recordingBytes);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(
+                        $"[BACKGROUND AI] Error: {ex.Message}");
+                    BotLog.Info($"Error: {ex.Message}");
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -781,7 +743,225 @@ public class MediaSessionService
             _recordingStarted.TryRemove(
                 callId,
                 out _);
+
+            // Immediately restart recording regardless of outcome.
+            // playPrompt will barge in if AI responds while recording.
+            await StartNextConversationTurnAsync(
+                callId);
         }
+    }
+
+    // ============================================================
+    // BACKGROUND: AI → TTS → PLAY PROMPT
+    // ============================================================
+
+    private async Task RecognizeAndRespondAsync(
+        string callId,
+        byte[] recordingBytes)
+    {
+        Console.WriteLine();
+        Console.WriteLine(
+            "Sending recording to Azure Speech...");
+
+        var recognizedText =
+            await _speechService
+                .RecognizeRecordingAsync(
+                    recordingBytes);
+
+        if (string.IsNullOrWhiteSpace(
+                recognizedText))
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                "[SPEECH] No recognizable speech.");
+
+            return;
+        }
+
+        var transcript =
+            _meetingContextService.AppendLiveTranscript(
+                callId,
+                recognizedText);
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" MEETING TRANSCRIPT");
+        Console.WriteLine("================================================");
+        Console.WriteLine(
+            $"Call ID : {callId}");
+        Console.WriteLine(
+            transcript);
+        Console.WriteLine(
+            "================================================");
+
+        var requireWakeWord =
+            _configuration.GetValue(
+                "Recording:RequireWakeWord",
+                false);
+
+        var invoked =
+            WakeWordDetector.IsAgentInvocation(
+                recognizedText);
+
+        if (requireWakeWord && !invoked)
+        {
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" PASSIVE MEETING SPEECH");
+            Console.WriteLine("================================================");
+            Console.WriteLine(
+                $"Heard: {recognizedText}");
+            Console.WriteLine(
+                "Say 'Agent Nova' plus your question.");
+            Console.WriteLine(
+                "================================================");
+            return;
+        }
+
+        if (invoked &&
+            WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            BotLog.Info("Leaving meeting...");
+            await LeaveMeetingAsync(callId);
+            return;
+        }
+
+        if (requireWakeWord &&
+            invoked &&
+            !WakeWordDetector.IsActionableRequest(recognizedText))
+        {
+            Console.WriteLine(
+                $"[LISTEN] Ignoring casual Agent Nova mention: {recognizedText}");
+            return;
+        }
+
+        var question =
+            invoked
+                ? WakeWordDetector.RemoveActivationPhrase(
+                    recognizedText)
+                : recognizedText;
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" AGENT NOVA INVOCATION DETECTED");
+        Console.WriteLine("================================================");
+        Console.WriteLine(
+            $"Original speech : {recognizedText}");
+        Console.WriteLine(
+            $"Question        : {question}");
+        Console.WriteLine(
+            "================================================");
+
+        BotLog.Info($"User: {recognizedText}");
+        BotLog.Info("Processing...");
+
+        await ProcessAgentResponseAsync(
+            callId,
+            question);
+    }
+
+    private async Task LeaveMeetingAsync(string callId)
+    {
+        try
+        {
+            if (!_calls.TryGetValue(callId, out var call))
+            {
+                BotLog.Info("Error: Call not found; cannot leave meeting.");
+                return;
+            }
+
+            try
+            {
+                var goodbyeUrl =
+                    await _speechSynthesisService.SynthesizeSpeechAsync(
+                        "Goodbye. I am leaving the meeting now.");
+                if (!string.IsNullOrWhiteSpace(goodbyeUrl))
+                {
+                    await PlayPromptAsync(callId, goodbyeUrl);
+                    await Task.Delay(2500);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[LEAVE] Goodbye audio failed: {ex.Message}");
+            }
+
+            await call.DeleteAsync();
+            BotLog.Info("Left the meeting.");
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Could not leave meeting. {ex.Message}");
+            Console.WriteLine($"[LEAVE] {ex}");
+        }
+    }
+
+    private async Task ProcessAgentResponseAsync(
+        string callId,
+        string question)
+    {
+        Console.WriteLine();
+        Console.WriteLine(
+            "Sending recognized speech to Azure OpenAI...");
+
+        var aiResponse =
+            await _aiResponseService
+                .GetResponseAsync(
+                    callId,
+                    question);
+
+        if (string.IsNullOrWhiteSpace(
+                aiResponse))
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                "[AI] No response received.");
+
+            BotLog.Info("Error: No AI response text.");
+            return;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" AGENT TEAM MATE RESPONSE");
+        Console.WriteLine("================================================");
+
+        Console.WriteLine(
+            aiResponse);
+
+        Console.WriteLine(
+            "================================================");
+
+        BotLog.Info($"Nova: {aiResponse}");
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "Generating Agent Team Mate voice...");
+
+        var audioUrl =
+            await _speechSynthesisService
+                .SynthesizeSpeechAsync(
+                    aiResponse);
+
+        if (string.IsNullOrWhiteSpace(
+                    audioUrl))
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                "[TTS] No audio URL generated.");
+
+            BotLog.Info("Error: Could not generate voice audio.");
+            return;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"Generated audio URL : {audioUrl}");
+
+        await PlayPromptAsync(
+            callId,
+            audioUrl);
     }
 
     // ============================================================
@@ -987,6 +1167,10 @@ public class MediaSessionService
 
             TrackCall(
                 call);
+
+            _meetingContextService.EnrichFromCallResource(
+                call.Id,
+                call.Resource);
         }
 
         foreach (var call
@@ -1011,6 +1195,9 @@ public class MediaSessionService
                 out _);
 
             _aiResponseService.ClearConversation(
+                call.Id);
+
+            _meetingContextService.Clear(
                 call.Id);
 
             if (_calls.TryRemove(
@@ -1047,6 +1234,10 @@ public class MediaSessionService
 
         Console.WriteLine(
             $"[CALL] {call.Id} state={state}");
+
+        _meetingContextService.EnrichFromCallResource(
+            call.Id,
+            call.Resource);
 
         if (state ==
             CallState.Established)
@@ -1104,6 +1295,9 @@ public class MediaSessionService
                 out _);
 
             _aiResponseService.ClearConversation(
+                call.Id);
+
+            _meetingContextService.Clear(
                 call.Id);
 
             Console.WriteLine(

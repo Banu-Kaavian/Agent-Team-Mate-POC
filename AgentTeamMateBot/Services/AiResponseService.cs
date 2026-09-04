@@ -9,13 +9,18 @@ public class AiResponseService
     private const int MaxMessagesPerCall = 20;
 
     private readonly IConfiguration _configuration;
+    private readonly MeetingContextService _meetingContextService;
     private readonly HttpClient _httpClient;
     private readonly ConcurrentDictionary<string, CallConversation> _conversations = new();
 
-    public AiResponseService(IConfiguration configuration)
+    public AiResponseService(
+        IConfiguration configuration,
+        MeetingContextService meetingContextService)
     {
         _configuration = configuration;
+        _meetingContextService = meetingContextService;
         _httpClient = new HttpClient();
+        _httpClient.Timeout = TimeSpan.FromSeconds(20);
     }
 
     public async Task<string?> GetResponseAsync(
@@ -29,8 +34,10 @@ public class AiResponseService
             return null;
 
         var endpoint = _configuration["AzureOpenAI:Endpoint"];
-        var deployment = _configuration["AzureOpenAI:Deployment"];
-        var apiKey = _configuration["AzureOpenAI:ApiKey"];
+        var deployment = _configuration["AzureOpenAI:Deployment"]
+            ?? _configuration["OPENAI_MODEL"];
+        var apiKey = _configuration["AzureOpenAI:ApiKey"]
+            ?? _configuration["OPENAI_API_KEY"];
 
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new Exception("AzureOpenAI:Endpoint missing");
@@ -58,29 +65,33 @@ public class AiResponseService
         var history =
             conversation.Snapshot();
 
-        var input =
-            history
-                .Select(message => new
-                {
-                    role = message.Role,
-                    content = message.Content
-                })
-                .ToArray();
+        // Skip Graph transcript lookup on the spoken path. It can take minutes
+        // and blocks Azure OpenAI. Live transcript from this call is enough.
+        var liveTranscript =
+            _meetingContextService.GetLiveTranscript(
+                callId);
+
+        var apiVersion =
+            _configuration["AzureOpenAI:ApiVersion"]
+            ?? "2025-01-01-preview";
 
         var url =
-            $"{endpoint.TrimEnd('/')}/openai/v1/responses";
+            $"{endpoint.TrimEnd('/')}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
 
+        var messages =
+            BuildMessages(
+                history,
+                meetingContext: null,
+                liveTranscript,
+                userMessage);
+
+        // gpt-5-mini spends tokens on hidden reasoning. A small
+        // max_completion_tokens budget often finishes with empty content.
         var payload = new
         {
-            model = deployment,
-
-            instructions =
-                "You are Agent Team Mate, an AI participant in a Microsoft Teams meeting. " +
-                "Respond naturally and briefly because your response will be spoken aloud. " +
-                "Previous messages are the ongoing conversation in this same Teams meeting. " +
-                "Use that context when answering.",
-
-            input
+            messages,
+            max_completion_tokens = 1024,
+            reasoning_effort = "minimal"
         };
 
         var json =
@@ -108,9 +119,20 @@ public class AiResponseService
         Console.WriteLine(userMessage);
         Console.WriteLine("================================================");
 
-        using var response =
-            await _httpClient.SendAsync(request);
+        HttpResponseMessage response;
+        try
+        {
+            response =
+                await _httpClient.SendAsync(request);
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Azure OpenAI request failed. {ex.Message}");
+            throw;
+        }
 
+        using (response)
+        {
         var body =
             await response.Content.ReadAsStringAsync();
 
@@ -124,6 +146,9 @@ public class AiResponseService
             Console.WriteLine(body);
             Console.WriteLine("================================================");
 
+            BotLog.Info(
+                $"Error: Azure OpenAI {(int)response.StatusCode}. {TrimForLog(body)}");
+
             return null;
         }
 
@@ -131,48 +156,127 @@ public class AiResponseService
             JsonDocument.Parse(body);
 
         if (!document.RootElement.TryGetProperty(
-                "output",
-                out var output))
+                "choices",
+                out var choices) ||
+            choices.ValueKind != JsonValueKind.Array)
         {
+            BotLog.Info("Error: Azure OpenAI response had no choices.");
             return null;
         }
 
-        foreach (var item in output.EnumerateArray())
+        foreach (var choice in choices.EnumerateArray())
         {
-            if (!item.TryGetProperty(
-                    "content",
-                    out var content))
+            var answer = ExtractMessageText(choice);
+
+            if (string.IsNullOrWhiteSpace(answer))
                 continue;
 
-            foreach (var part in content.EnumerateArray())
-            {
-                if (!part.TryGetProperty(
-                        "text",
-                        out var textElement))
-                    continue;
+            conversation.Add(
+                "assistant",
+                answer);
 
-                var answer =
-                    textElement.GetString();
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" AI RESPONSE");
+            Console.WriteLine("================================================");
+            Console.WriteLine(answer);
+            Console.WriteLine("================================================");
 
-                if (string.IsNullOrWhiteSpace(answer))
-                    continue;
+            return answer;
+        }
 
-                conversation.Add(
-                    "assistant",
-                    answer);
+        BotLog.Info(
+            $"Error: Azure OpenAI returned no text. {DescribeEmptyResponse(document.RootElement)}");
+        return null;
+        }
+    }
 
-                Console.WriteLine();
-                Console.WriteLine("================================================");
-                Console.WriteLine(" AI RESPONSE");
-                Console.WriteLine("================================================");
-                Console.WriteLine(answer);
-                Console.WriteLine("================================================");
+    private static string? ExtractMessageText(JsonElement choice)
+    {
+        if (!choice.TryGetProperty("message", out var message))
+            return null;
 
-                return answer;
-            }
+        if (message.TryGetProperty("content", out var content))
+        {
+            var text = ReadContent(content);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+
+        if (message.TryGetProperty("refusal", out var refusal))
+        {
+            var text = refusal.GetString();
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
         }
 
         return null;
+    }
+
+    private static string? ReadContent(JsonElement content)
+    {
+        if (content.ValueKind == JsonValueKind.String)
+            return content.GetString();
+
+        if (content.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var builder = new StringBuilder();
+        foreach (var part in content.EnumerateArray())
+        {
+            if (part.ValueKind == JsonValueKind.String)
+            {
+                builder.Append(part.GetString());
+                continue;
+            }
+
+            if (part.TryGetProperty("text", out var text))
+                builder.Append(text.GetString());
+        }
+
+        var combined = builder.ToString().Trim();
+        return string.IsNullOrWhiteSpace(combined) ? null : combined;
+    }
+
+    private static string DescribeEmptyResponse(JsonElement root)
+    {
+        var finishReason = "unknown";
+        if (root.TryGetProperty("choices", out var choices) &&
+            choices.ValueKind == JsonValueKind.Array &&
+            choices.GetArrayLength() > 0 &&
+            choices[0].TryGetProperty("finish_reason", out var reason))
+        {
+            finishReason = reason.GetString() ?? finishReason;
+        }
+
+        var completionTokens = "?";
+        var reasoningTokens = "?";
+        if (root.TryGetProperty("usage", out var usage))
+        {
+            if (usage.TryGetProperty("completion_tokens", out var completion))
+                completionTokens = completion.ToString();
+
+            if (usage.TryGetProperty("completion_tokens_details", out var details) &&
+                details.TryGetProperty("reasoning_tokens", out var reasoning))
+            {
+                reasoningTokens = reasoning.ToString();
+            }
+        }
+
+        return $"finish_reason={finishReason}, completion_tokens={completionTokens}, reasoning_tokens={reasoningTokens}.";
+    }
+
+    private static string TrimForLog(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "(empty body)";
+        }
+
+        var trimmed = body.Replace('\n', ' ').Trim();
+        return trimmed.Length <= 240
+            ? trimmed
+            : trimmed[..240];
     }
 
     public void ClearConversation(
@@ -192,6 +296,97 @@ public class AiResponseService
             Console.WriteLine($"Call ID : {callId}");
             Console.WriteLine("================================================");
         }
+    }
+
+    private async Task<string?> GetMeetingContextSafelyAsync(
+        string callId)
+    {
+        try
+        {
+            return await _meetingContextService
+                .GetMeetingContextAsync(
+                    callId);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[MEETING CONTEXT] AI lookup failed: {ex.Message}");
+            Console.WriteLine(
+                "[MEETING CONTEXT] Transcript not available. Continuing without transcript.");
+            return null;
+        }
+    }
+
+    private static object[] BuildMessages(
+        IReadOnlyList<ConversationMessage> history,
+        string? meetingContext,
+        string? liveTranscript,
+        string currentQuestion)
+    {
+        var messages =
+            new List<object>
+            {
+                new
+                {
+                    role = "system",
+                    content =
+                        BuildInstructions(
+                            meetingContext,
+                            liveTranscript,
+                            currentQuestion)
+                }
+            };
+
+        foreach (var message in history)
+        {
+            messages.Add(
+                new
+                {
+                    role = message.Role,
+                    content = message.Content
+                });
+        }
+
+        return messages.ToArray();
+    }
+
+    private static string BuildInstructions(
+        string? meetingContext,
+        string? liveTranscript,
+        string currentQuestion)
+    {
+        var builder = new StringBuilder();
+        var now = DateTime.Now;
+
+        builder.Append(
+            "You are Agent Nova in a live Microsoft Teams meeting. ");
+        builder.Append(
+            "Answer in one or two short spoken sentences. No markdown, lists, URLs, or symbols. ");
+        builder.Append(
+            "Start with the answer. Do not invent meeting facts. ");
+        builder.Append(
+            $"The current local date and time is {now:dddd, MMMM d, yyyy} at {now:h:mm tt}.");
+
+        builder.AppendLine();
+        builder.AppendLine();
+        builder.Append("Meeting transcript: ");
+        builder.AppendLine(
+            string.IsNullOrWhiteSpace(liveTranscript)
+                ? "None yet."
+                : liveTranscript);
+
+        if (!string.IsNullOrWhiteSpace(meetingContext))
+        {
+            builder.AppendLine();
+            builder.Append("Graph transcript: ");
+            builder.AppendLine(meetingContext);
+        }
+
+        builder.AppendLine();
+        builder.Append("Current question: ");
+        builder.Append(currentQuestion);
+
+        return builder.ToString();
     }
 
     private static void LogConversationMemory(

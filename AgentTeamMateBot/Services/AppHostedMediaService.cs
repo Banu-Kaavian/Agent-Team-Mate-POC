@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
@@ -21,12 +22,19 @@ public class AppHostedMediaService
     private readonly GraphAuthService _graphAuthService;
     private readonly AudioHandler _audioHandler;
     private readonly SpeechRecognitionService _speechService;
+    private readonly AiResponseService _aiResponseService;
+    private readonly SpeechSynthesisService _speechSynthesisService;
+    private readonly MeetingContextService _meetingContextService;
     private readonly IBotMediaLogger _mediaLogger;
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
     private readonly ConcurrentDictionary<string, ILocalMediaSession> _mediaSessions = new();
     private readonly ConcurrentDictionary<Guid, AudioSocketBinding> _audioBindings = new();
+    private readonly ConcurrentDictionary<string, byte> _welcomePlayed = new();
     private readonly object _initLock = new();
+
+    // Track the active call ID for the continuous recognizer callback
+    private string? _activeCallId;
 
     private IGraphLogger? _graphLogger;
     private ICommunicationsClient? _client;
@@ -39,16 +47,27 @@ public class AppHostedMediaService
         GraphAuthService graphAuthService,
         AudioHandler audioHandler,
         SpeechRecognitionService speechService,
+        AiResponseService aiResponseService,
+        SpeechSynthesisService speechSynthesisService,
+        MeetingContextService meetingContextService,
         IBotMediaLogger mediaLogger)
     {
         _configuration = configuration;
         _graphAuthService = graphAuthService;
         _audioHandler = audioHandler;
         _speechService = speechService;
+        _aiResponseService = aiResponseService;
+        _speechSynthesisService = speechSynthesisService;
+        _meetingContextService = meetingContextService;
         _mediaLogger = mediaLogger;
+
+        // Subscribe to continuous speech recognition events
+        _speechService.OnSpeechRecognized += OnLiveSpeechRecognized;
     }
 
     public bool IsInitialized => _initialized && _mediaPlatformReady;
+
+    public string? InitError => _initError;
 
     public bool IsAppHostedCall(string? callId)
     {
@@ -67,10 +86,7 @@ public class AppHostedMediaService
 
             try
             {
-                Console.WriteLine();
-                Console.WriteLine("================================================");
-                Console.WriteLine(" MEDIA PLATFORM INITIALIZATION");
-                Console.WriteLine("================================================");
+                BotLog.Info("Initializing MediaPlatform...");
 
                 var clientId = _graphAuthService.ClientId;
                 var callbackUri = _configuration["Bot:CallbackUri"]
@@ -80,6 +96,7 @@ public class AppHostedMediaService
                     ?? "teammate-bot.westus3.cloudapp.azure.com";
 
                 WarnIfTunnelCallback(callbackUri);
+                EnsureNativeMediaPresent();
 
                 var internalPort = _configuration.GetValue("Media:InternalPort", 8445);
                 var publicPort = _configuration.GetValue("Media:PublicPort", 8445);
@@ -90,14 +107,22 @@ public class AppHostedMediaService
                 var privateIp = ResolvePrivateIp();
                 var certificate = LoadCertificate(serviceFqdn);
 
+                if (!certificate.HasPrivateKey)
+                {
+                    throw new InvalidOperationException(
+                        $"Certificate {certificate.Thumbprint} has no private key accessible to this process. " +
+                        "Import the PFX into LocalMachine\\My and grant the bot user Read on the private key.");
+                }
+
+                // EchoBot / Media SDK loads the cert from LocalMachine by thumbprint.
                 var instanceSettings = new MediaPlatformInstanceSettings
                 {
                     ServiceFqdn = serviceFqdn,
+                    CertificateThumbprint = certificate.Thumbprint,
                     InstancePublicIPAddress = publicIp,
                     InstanceInternalPort = internalPort,
                     InstancePublicPort = publicPort,
-                    MediaPortRange = new PortRange((uint)portMin, (uint)portMax),
-                    Certificate = certificate
+                    MediaPortRange = new PortRange((uint)portMin, (uint)portMax)
                 };
 
                 var mediaPlatformSettings = new MediaPlatformSettings
@@ -107,9 +132,11 @@ public class AppHostedMediaService
                     MediaPlatformLogger = _mediaLogger
                 };
 
+                BotLog.Info(
+                    $"MediaPlatform FQDN={serviceFqdn} PublicIP={publicIp} PrivateIP={privateIp?.ToString() ?? "(detected-none)"} Cert={certificate.Thumbprint}");
                 Console.WriteLine($"Service FQDN     : {serviceFqdn}");
                 Console.WriteLine($"Public IP        : {publicIp}");
-                Console.WriteLine($"Private IP       : {(privateIp?.ToString() ?? "(not used; SDK property not implemented in this package)")}");
+                Console.WriteLine($"Private IP       : {(privateIp?.ToString() ?? "(not required by this SDK package)")}");
                 Console.WriteLine($"Control port     : {internalPort} internal / {publicPort} public");
                 Console.WriteLine($"Media UDP ports  : {portMin}-{portMax}");
                 Console.WriteLine($"Certificate      : {certificate.Subject}");
@@ -141,6 +168,7 @@ public class AppHostedMediaService
                 _initialized = true;
                 _initError = null;
 
+                BotLog.Info("MediaPlatform ready.");
                 Console.WriteLine("MEDIA PLATFORM INITIALIZED");
                 Console.WriteLine("================================================");
             }
@@ -148,19 +176,21 @@ public class AppHostedMediaService
             {
                 _initialized = false;
                 _mediaPlatformReady = false;
-                _initError = ex.Message;
+                _initError = FormatExceptionChain(ex);
 
+                BotLog.Info($"MediaPlatform FAILED: {_initError}");
                 Console.WriteLine();
                 Console.WriteLine("================================================");
                 Console.WriteLine(" MEDIA PLATFORM INITIALIZATION FAILURE");
                 Console.WriteLine("================================================");
-                Console.WriteLine(ex.Message);
+                Console.WriteLine(_initError);
                 Console.WriteLine(ex);
                 Console.WriteLine();
                 Console.WriteLine("Phase 2 app-hosted listening is BLOCKED until MediaPlatform starts.");
-                Console.WriteLine("Required: Azure Windows Server x64 VM, VC++ x64 runtime,");
-                Console.WriteLine("SSL cert for Bot:ServiceFqdn, Media:PublicIpAddress,");
-                Console.WriteLine("NSG inbound TCP 8445 and UDP media port range.");
+                Console.WriteLine("Required: full Windows Server (not Core), VC++ x64 runtime,");
+                Console.WriteLine("Windows Media Foundation, SSL cert in LocalMachine\\My,");
+                Console.WriteLine("Media:PublicIpAddress + Media:PrivateIpAddress,");
+                Console.WriteLine("NSG inbound TCP 443/8445 and UDP 20000-20999.");
                 Console.WriteLine("Service-hosted POST /api/join is unaffected.");
                 Console.WriteLine("================================================");
             }
@@ -177,8 +207,8 @@ public class AppHostedMediaService
         if (!_initialized || !_mediaPlatformReady || _client == null)
         {
             throw new InvalidOperationException(
-                "App-hosted MediaPlatform is not initialized. " +
-                (_initError ?? "See MEDIA PLATFORM INITIALIZATION FAILURE logs. Continuous audio is NOT proven."));
+                "MediaPlatform was not initialized. " +
+                (_initError ?? "Missing Media:PublicIpAddress, SSL cert for Bot:ServiceFqdn, or VC++ x64 runtime."));
         }
 
         ILocalMediaSession? mediaSession = null;
@@ -243,6 +273,7 @@ public class AppHostedMediaService
 
             var statefulCall = await _client.Calls().AddAsync(call, mediaSession);
             audioBinding.CallId = statefulCall.Id;
+            _activeCallId = statefulCall.Id;
             TrackCall(statefulCall, mediaSession, audioBinding);
 
             Console.WriteLine($"Call ID    : {statefulCall.Id}");
@@ -351,6 +382,24 @@ public class AppHostedMediaService
         binding.SendStatusHandler = (_, args) =>
         {
             Console.WriteLine($"[AUDIO SOCKET] SendStatus={args.MediaSendStatus} call={binding.CallId}");
+
+            if (args.MediaSendStatus == MediaSendStatus.Active &&
+                !string.IsNullOrWhiteSpace(binding.CallId))
+            {
+                var callId = binding.CallId;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await WaitForCallEstablishedAsync(callId);
+                        await PlayWelcomeAsync(callId);
+                    }
+                    catch (Exception ex)
+                    {
+                        BotLog.Info($"Error: Welcome playback failed. {ex.Message}");
+                    }
+                });
+            }
         };
 
         audioSocket.AudioMediaReceived += binding.AudioReceivedHandler;
@@ -397,6 +446,7 @@ public class AppHostedMediaService
         foreach (var call in args.RemovedResources)
         {
             Console.WriteLine($"[APP-HOSTED CALL] Removed {call.Id}");
+            _welcomePlayed.TryRemove(call.Id, out _);
             _calls.TryRemove(call.Id, out _);
             if (_mediaSessions.TryRemove(call.Id, out var session))
             {
@@ -499,6 +549,335 @@ public class AppHostedMediaService
         }
     }
 
+    // ============================================================
+    // LIVE SPEECH → AGENT NOVA → AI → TTS → AUDIOSOCKET
+    // ============================================================
+
+    private void OnLiveSpeechRecognized(string recognizedText)
+    {
+        var callId = _activeCallId;
+        if (string.IsNullOrWhiteSpace(callId))
+        {
+            return;
+        }
+
+        _meetingContextService.AppendLiveTranscript(
+            callId, recognizedText);
+
+        if (!WakeWordDetector.IsAgentInvocation(recognizedText))
+        {
+            return;
+        }
+
+        if (WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            BotLog.Info("Leaving meeting...");
+            _ = Task.Run(async () => await LeaveMeetingAsync(callId, sayGoodbye: true));
+            return;
+        }
+
+        if (!WakeWordDetector.IsActionableRequest(recognizedText))
+        {
+            Console.WriteLine(
+                $"[APP-HOSTED] Ignoring casual Agent Nova mention: {recognizedText}");
+            return;
+        }
+
+        var question =
+            WakeWordDetector.RemoveActivationPhrase(recognizedText);
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" [APP-HOSTED] AGENT NOVA INVOCATION DETECTED");
+        Console.WriteLine("================================================");
+        Console.WriteLine($"Speech   : {recognizedText}");
+        Console.WriteLine($"Question : {question}");
+        Console.WriteLine("================================================");
+
+        BotLog.Info($"User: {recognizedText}");
+        BotLog.Info("Processing...");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var aiResponse =
+                    await _aiResponseService
+                        .GetResponseAsync(callId, question);
+
+                if (string.IsNullOrWhiteSpace(aiResponse))
+                {
+                    BotLog.Info("Error: No AI response text.");
+                    Console.WriteLine("[APP-HOSTED AI] No response received.");
+                    return;
+                }
+
+                Console.WriteLine();
+                Console.WriteLine("================================================");
+                Console.WriteLine(" [APP-HOSTED] AGENT RESPONSE");
+                Console.WriteLine("================================================");
+                Console.WriteLine(aiResponse);
+                Console.WriteLine("================================================");
+
+                BotLog.Info($"Nova: {aiResponse}");
+
+                var pcmAudio =
+                    await SynthesizeSpeechToPcmAsync(aiResponse);
+
+                if (pcmAudio == null || pcmAudio.Length == 0)
+                {
+                    BotLog.Info("Error: Could not generate voice audio.");
+                    Console.WriteLine("[APP-HOSTED TTS] No audio generated.");
+                    return;
+                }
+
+                await SendPcmToAudioSocketAsync(callId, pcmAudio);
+            }
+            catch (Exception ex)
+            {
+                BotLog.Info($"Error: {ex.Message}");
+                Console.WriteLine(
+                    $"[APP-HOSTED] AI/TTS pipeline error: {ex.Message}");
+            }
+        });
+    }
+
+    private async Task LeaveMeetingAsync(string callId, bool sayGoodbye)
+    {
+        try
+        {
+            if (sayGoodbye)
+            {
+                try
+                {
+                    var pcm = await SynthesizeSpeechToPcmAsync(
+                        "Goodbye. I am leaving the meeting now.");
+                    if (pcm != null && pcm.Length > 0)
+                    {
+                        await SendPcmToAudioSocketAsync(callId, pcm);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[APP-HOSTED LEAVE] Goodbye audio failed: {ex.Message}");
+                }
+            }
+
+            if (!_calls.TryGetValue(callId, out var call))
+            {
+                BotLog.Info("Error: Call not found; cannot leave meeting.");
+                return;
+            }
+
+            await call.DeleteAsync();
+            BotLog.Info("Left the meeting.");
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Could not leave meeting. {ex.Message}");
+            Console.WriteLine($"[APP-HOSTED LEAVE] {ex}");
+        }
+    }
+
+    // ============================================================
+    // SYNTHESIZE SPEECH TO RAW PCM / WELCOME
+    // ============================================================
+
+    private async Task PlayWelcomeAsync(string callId)
+    {
+        if (!_welcomePlayed.TryAdd(callId, 0))
+        {
+            return;
+        }
+
+        try
+        {
+            BotLog.Info("Playing welcome...");
+
+            var pcmAudio = await SynthesizeSpeechToPcmAsync(
+                "Hi, I am Agent Nova. I am listening. Say your request.");
+
+            if (pcmAudio == null || pcmAudio.Length == 0)
+            {
+                BotLog.Info("Error: Could not generate welcome audio.");
+                return;
+            }
+
+            await SendPcmToAudioSocketAsync(callId, pcmAudio);
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Welcome playback failed. {ex.Message}");
+            Console.WriteLine($"[APP-HOSTED WELCOME] {ex.Message}");
+        }
+    }
+
+    private async Task WaitForCallEstablishedAsync(string callId)
+    {
+        for (var i = 0; i < 75; i++)
+        {
+            if (_calls.TryGetValue(callId, out var call) &&
+                call.Resource?.State == CallState.Established)
+            {
+                return;
+            }
+
+            await Task.Delay(200);
+        }
+
+        Console.WriteLine(
+            $"[APP-HOSTED WELCOME] Timed out waiting for Established on {callId}. Playing anyway.");
+    }
+
+    // ============================================================
+    // SYNTHESIZE SPEECH TO RAW PCM (16kHz 16-bit mono)
+    // ============================================================
+
+    private async Task<byte[]?> SynthesizeSpeechToPcmAsync(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var key = _configuration["Speech:Key"]
+            ?? _configuration["AZURE_SPEECH_KEY"];
+
+        var region = _configuration["Speech:Region"]
+            ?? _configuration["AZURE_SPEECH_REGION"];
+
+        var voice = _configuration["Speech:Voice"]
+            ?? "en-US-AvaMultilingualNeural";
+
+        if (string.IsNullOrWhiteSpace(key) ||
+            string.IsNullOrWhiteSpace(region))
+        {
+            Console.WriteLine("[APP-HOSTED TTS] Speech key or region missing.");
+            return null;
+        }
+
+        var speechConfig =
+            Microsoft.CognitiveServices.Speech.SpeechConfig
+                .FromSubscription(key, region);
+
+        speechConfig.SpeechSynthesisVoiceName = voice;
+        speechConfig.SetSpeechSynthesisOutputFormat(
+            Microsoft.CognitiveServices.Speech.SpeechSynthesisOutputFormat
+                .Raw16Khz16BitMonoPcm);
+
+        using var synthesizer =
+            new Microsoft.CognitiveServices.Speech.SpeechSynthesizer(
+                speechConfig, null);
+
+        var result = await synthesizer.SpeakTextAsync(text);
+
+        if (result.Reason ==
+            Microsoft.CognitiveServices.Speech.ResultReason
+                .SynthesizingAudioCompleted)
+        {
+            Console.WriteLine(
+                $"[APP-HOSTED TTS] Synthesized {result.AudioData.Length} bytes of raw PCM.");
+
+            return result.AudioData;
+        }
+
+        Console.WriteLine(
+            $"[APP-HOSTED TTS] Synthesis failed: {result.Reason}");
+
+        return null;
+    }
+
+    // ============================================================
+    // SEND RAW PCM FRAMES VIA AUDIOSOCKET
+    // Media SDK keeps using each buffer after Send returns. Do not
+    // free the unmanaged memory here — AudioSendBuffer.Dispose does.
+    // ============================================================
+
+    private Task SendPcmToAudioSocketAsync(string callId, byte[] pcmData)
+    {
+        return Task.Run(() => SendPcmToAudioSocket(callId, pcmData));
+    }
+
+    private void SendPcmToAudioSocket(
+        string callId, byte[] pcmData)
+    {
+        if (!_mediaSessions.TryGetValue(callId, out var mediaSession))
+        {
+            Console.WriteLine(
+                $"[APP-HOSTED SEND] No media session for call {callId}.");
+            return;
+        }
+
+        var audioSocket = mediaSession.AudioSocket;
+        if (audioSocket == null)
+        {
+            Console.WriteLine(
+                "[APP-HOSTED SEND] AudioSocket is null.");
+            return;
+        }
+
+        // PCM 16kHz 16-bit mono: 20ms frames = 640 bytes
+        const int frameSize = 640;
+        const long frameDurationTicks = 20 * 10000;
+        var timestamp = DateTime.UtcNow.Ticks;
+        var totalFrames = pcmData.Length / frameSize;
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" [APP-HOSTED] SENDING AUDIO TO TEAMS");
+        Console.WriteLine("================================================");
+        Console.WriteLine($"Call ID      : {callId}");
+        Console.WriteLine($"PCM bytes    : {pcmData.Length}");
+        Console.WriteLine($"Frames (20ms): {totalFrames}");
+        Console.WriteLine("================================================");
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        for (var i = 0; i < totalFrames; i++)
+        {
+            var unmanagedBuffer = Marshal.AllocHGlobal(frameSize);
+            try
+            {
+                Marshal.Copy(pcmData, i * frameSize, unmanagedBuffer, frameSize);
+
+                // Ownership of unmanagedBuffer transfers to AudioSendBuffer.
+                // Media platform calls Dispose later and frees the memory.
+                var buffer = new AudioSendBuffer(
+                    unmanagedBuffer,
+                    frameSize,
+                    AudioFormat.Pcm16K,
+                    timestamp);
+
+                unmanagedBuffer = IntPtr.Zero;
+                audioSocket.Send(buffer);
+            }
+            catch (Exception ex)
+            {
+                if (unmanagedBuffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(unmanagedBuffer);
+                }
+
+                Console.WriteLine(
+                    $"[APP-HOSTED SEND] Frame {i} send error: {ex.Message}");
+                break;
+            }
+
+            timestamp += frameDurationTicks;
+
+            var targetMs = (i + 1) * 20;
+            var delayMs = targetMs - (int)stopwatch.ElapsedMilliseconds;
+            if (delayMs > 0)
+            {
+                Thread.Sleep(delayMs);
+            }
+        }
+
+        Console.WriteLine(
+            $"[APP-HOSTED SEND] Sent audio for call {callId}.");
+    }
+
     private IPAddress ResolvePublicIp(string serviceFqdn)
     {
         var configured = _configuration["Media:PublicIpAddress"];
@@ -529,12 +908,99 @@ public class AppHostedMediaService
     private IPAddress? ResolvePrivateIp()
     {
         var configured = _configuration["Media:PrivateIpAddress"];
-        if (string.IsNullOrWhiteSpace(configured))
+        if (!string.IsNullOrWhiteSpace(configured))
         {
-            return null;
+            return IPAddress.Parse(configured.Trim());
         }
 
-        return IPAddress.Parse(configured.Trim());
+        try
+        {
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != OperationalStatus.Up)
+                {
+                    continue;
+                }
+
+                if (nic.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                {
+                    continue;
+                }
+
+                foreach (var address in nic.GetIPProperties().UnicastAddresses)
+                {
+                    if (address.Address.AddressFamily != AddressFamily.InterNetwork)
+                    {
+                        continue;
+                    }
+
+                    if (IPAddress.IsLoopback(address.Address))
+                    {
+                        continue;
+                    }
+
+                    // Prefer Azure VNet private ranges.
+                    var bytes = address.Address.GetAddressBytes();
+                    var isPrivate =
+                        bytes[0] == 10 ||
+                        (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+                        (bytes[0] == 192 && bytes[1] == 168);
+
+                    if (isPrivate)
+                    {
+                        return address.Address;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MEDIA] Private IP auto-detect failed: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    private static void EnsureNativeMediaPresent()
+    {
+        var nativeMedia = Path.Combine(AppContext.BaseDirectory, "NativeMedia.dll");
+        if (!File.Exists(nativeMedia))
+        {
+            throw new InvalidOperationException(
+                $"NativeMedia.dll was not found next to the app at {AppContext.BaseDirectory}. " +
+                "Rebuild so Microsoft.Skype.Bots.Media native binaries are copied to the output.");
+        }
+
+        var required = new[]
+        {
+            "RtmPal.dll",
+            "RtmCodecs.dll",
+            "skypert.dll",
+            "Ijwhost.dll"
+        };
+
+        var missing = required
+            .Where(name => !File.Exists(Path.Combine(AppContext.BaseDirectory, name)))
+            .ToArray();
+
+        if (missing.Length > 0)
+        {
+            throw new InvalidOperationException(
+                "Media native dependencies missing from output: " +
+                string.Join(", ", missing) +
+                $". Output folder: {AppContext.BaseDirectory}");
+        }
+    }
+
+    private static string FormatExceptionChain(Exception ex)
+    {
+        var parts = new List<string>();
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            parts.Add($"{current.GetType().Name}: {current.Message}");
+        }
+
+        return string.Join(" => ", parts);
     }
 
     private X509Certificate2 LoadCertificate(string host)
