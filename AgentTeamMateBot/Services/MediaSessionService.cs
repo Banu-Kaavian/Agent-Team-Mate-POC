@@ -22,6 +22,7 @@ public class MediaSessionService
     private readonly AiResponseService _aiResponseService;
     private readonly SpeechSynthesisService _speechSynthesisService;
     private readonly MeetingContextService _meetingContextService;
+    private readonly MeetingExportService _meetingExportService;
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
     private readonly ConcurrentDictionary<string, byte> _recordingStarted = new();
@@ -44,7 +45,8 @@ public class MediaSessionService
         SpeechRecognitionService speechService,
         AiResponseService aiResponseService,
         SpeechSynthesisService speechSynthesisService,
-        MeetingContextService meetingContextService)
+        MeetingContextService meetingContextService,
+        MeetingExportService meetingExportService)
     {
         _configuration = configuration;
         _graphAuthService = graphAuthService;
@@ -53,6 +55,7 @@ public class MediaSessionService
         _aiResponseService = aiResponseService;
         _speechSynthesisService = speechSynthesisService;
         _meetingContextService = meetingContextService;
+        _meetingExportService = meetingExportService;
     }
 
     public ICommunicationsClient? Client => _client;
@@ -818,6 +821,22 @@ public class MediaSessionService
             return;
         }
 
+        if ((!requireWakeWord || invoked) &&
+            WakeWordDetector.IsSummaryExportRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            BotLog.Info("Exporting meeting summary...");
+            var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
+            await SpeakAsync(callId, spoken);
+
+            if (WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+            {
+                await LeaveMeetingAsync(callId);
+            }
+
+            return;
+        }
+
         if (invoked &&
             WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
         {
@@ -859,6 +878,22 @@ public class MediaSessionService
         await ProcessAgentResponseAsync(
             callId,
             question);
+    }
+
+    private async Task SpeakAsync(string callId, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        var audioUrl = await _speechSynthesisService.SynthesizeSpeechAsync(text);
+        if (string.IsNullOrWhiteSpace(audioUrl))
+        {
+            return;
+        }
+
+        await PlayPromptAsync(callId, audioUrl);
     }
 
     private async Task LeaveMeetingAsync(string callId)

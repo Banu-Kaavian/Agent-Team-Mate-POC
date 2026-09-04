@@ -25,6 +25,7 @@ public class AppHostedMediaService
     private readonly AiResponseService _aiResponseService;
     private readonly SpeechSynthesisService _speechSynthesisService;
     private readonly MeetingContextService _meetingContextService;
+    private readonly MeetingExportService _meetingExportService;
     private readonly IBotMediaLogger _mediaLogger;
 
     private readonly ConcurrentDictionary<string, ICall> _calls = new();
@@ -50,6 +51,7 @@ public class AppHostedMediaService
         AiResponseService aiResponseService,
         SpeechSynthesisService speechSynthesisService,
         MeetingContextService meetingContextService,
+        MeetingExportService meetingExportService,
         IBotMediaLogger mediaLogger)
     {
         _configuration = configuration;
@@ -59,6 +61,7 @@ public class AppHostedMediaService
         _aiResponseService = aiResponseService;
         _speechSynthesisService = speechSynthesisService;
         _meetingContextService = meetingContextService;
+        _meetingExportService = meetingExportService;
         _mediaLogger = mediaLogger;
 
         // Subscribe to continuous speech recognition events
@@ -566,6 +569,35 @@ public class AppHostedMediaService
 
         if (!WakeWordDetector.IsAgentInvocation(recognizedText))
         {
+            return;
+        }
+
+        if (WakeWordDetector.IsSummaryExportRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            BotLog.Info("Exporting meeting summary...");
+            var leaveAfterExport = WakeWordDetector.IsLeaveMeetingRequest(recognizedText);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
+                    var pcm = await SynthesizeSpeechToPcmAsync(spoken);
+                    if (pcm != null && pcm.Length > 0)
+                    {
+                        await SendPcmToAudioSocketAsync(callId, pcm);
+                    }
+
+                    if (leaveAfterExport)
+                    {
+                        await LeaveMeetingAsync(callId, sayGoodbye: true);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    BotLog.Info($"Error: Meeting export failed. {ex.Message}");
+                }
+            });
             return;
         }
 

@@ -11,6 +11,7 @@ public class AiResponseService
     private readonly IConfiguration _configuration;
     private readonly MeetingContextService _meetingContextService;
     private readonly HttpClient _httpClient;
+    private readonly HttpClient _documentHttpClient;
     private readonly ConcurrentDictionary<string, CallConversation> _conversations = new();
 
     public AiResponseService(
@@ -21,6 +22,8 @@ public class AiResponseService
         _meetingContextService = meetingContextService;
         _httpClient = new HttpClient();
         _httpClient.Timeout = TimeSpan.FromSeconds(20);
+        _documentHttpClient = new HttpClient();
+        _documentHttpClient.Timeout = TimeSpan.FromSeconds(90);
     }
 
     public async Task<string?> GetResponseAsync(
@@ -188,6 +191,117 @@ public class AiResponseService
         BotLog.Info(
             $"Error: Azure OpenAI returned no text. {DescribeEmptyResponse(document.RootElement)}");
         return null;
+        }
+    }
+
+    public async Task<string?> GenerateMeetingDocumentAsync(
+        string callId,
+        string liveTranscript)
+    {
+        if (string.IsNullOrWhiteSpace(liveTranscript))
+            return null;
+
+        var endpoint = _configuration["AzureOpenAI:Endpoint"];
+        var deployment = _configuration["AzureOpenAI:Deployment"]
+            ?? _configuration["OPENAI_MODEL"];
+        var apiKey = _configuration["AzureOpenAI:ApiKey"]
+            ?? _configuration["OPENAI_API_KEY"];
+
+        if (string.IsNullOrWhiteSpace(endpoint) ||
+            string.IsNullOrWhiteSpace(deployment) ||
+            string.IsNullOrWhiteSpace(apiKey))
+        {
+            return liveTranscript;
+        }
+
+        var apiVersion =
+            _configuration["AzureOpenAI:ApiVersion"]
+            ?? "2025-01-01-preview";
+
+        var url =
+            $"{endpoint.TrimEnd('/')}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
+
+        var now = DateTime.Now;
+        var system =
+            "You write a meeting handoff document for a product workflow. " +
+            "Output plain text only. No markdown headings with hashes, no bullet symbols if you can use numbered lines. " +
+            "First write a PRD-style summary: problem, goals, requirements, decisions, open questions, and action items. " +
+            "Then write a Transcript section as speaker lines exactly like: Name: sentence. " +
+            "Use names when the notes include them. Otherwise use Participant. " +
+            "Do not invent facts that are not in the notes. " +
+            $"Local date and time: {now:dddd, MMMM d, yyyy} at {now:h:mm tt}.";
+
+        var payload = new
+        {
+            messages = new object[]
+            {
+                new { role = "system", content = system },
+                new
+                {
+                    role = "user",
+                    content =
+                        "Create the full meeting summary and transcript from these live notes:\n\n" +
+                        liveTranscript
+                }
+            },
+            max_completion_tokens = 4096,
+            reasoning_effort = "minimal"
+        };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Add("api-key", apiKey);
+        request.Content = new StringContent(
+            JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json");
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" GENERATING MEETING PRD / TRANSCRIPT");
+        Console.WriteLine("================================================");
+        Console.WriteLine($"Call ID : {callId}");
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await _documentHttpClient.SendAsync(request);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MEETING DOCUMENT] {ex.Message}");
+            return liveTranscript;
+        }
+
+        using (response)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"[MEETING DOCUMENT] Azure OpenAI {(int)response.StatusCode}");
+                return liveTranscript;
+            }
+
+            using var document = JsonDocument.Parse(body);
+            if (!document.RootElement.TryGetProperty("choices", out var choices) ||
+                choices.ValueKind != JsonValueKind.Array)
+            {
+                return liveTranscript;
+            }
+
+            foreach (var choice in choices.EnumerateArray())
+            {
+                var text = ExtractMessageText(choice);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    Console.WriteLine($"Generated {text.Length} characters.");
+                    Console.WriteLine("================================================");
+                    return text;
+                }
+            }
+
+            Console.WriteLine("[MEETING DOCUMENT] Empty model output. Using live transcript.");
+            Console.WriteLine("================================================");
+            return liveTranscript;
         }
     }
 

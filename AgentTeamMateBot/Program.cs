@@ -1,4 +1,4 @@
-using System.Security.Cryptography.X509Certificates;
+﻿using System.Security.Cryptography.X509Certificates;
 using AgentTeamMateBot.Media;
 using AgentTeamMateBot.Services;
 
@@ -94,6 +94,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddSingleton<SpeechSynthesisService>();
 builder.Services.AddSingleton<MeetingContextService>();
 builder.Services.AddSingleton<AiResponseService>();
+builder.Services.AddSingleton<MeetingExportService>();
 builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
 builder.Services.AddSingleton<GraphAuthService>();
 builder.Services.AddSingleton<SpeechRecognitionService>();

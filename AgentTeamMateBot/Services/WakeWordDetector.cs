@@ -31,6 +31,17 @@ public static class WakeWordDetector
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
 
+    private static readonly Regex SummaryExportPattern =
+        new(
+            @"\b(?:full\s+)?(?:summary|summarize|summarise|summarization|recap|transcript)\b|" +
+            @"\bprd\b|" +
+            @"\bproduct\s+requirements?\b|" +
+            @"\bmeeting\s+(?:notes|document|summary|transcript)\b|" +
+            @"\bsend\s+(?:the\s+)?(?:summary|transcript|prd|notes|document)\b",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
     // Phrases that remain after stripping "Agent Nova" but are not a real ask.
     private static readonly Regex FillerOnlyPattern =
         new(
@@ -71,6 +82,17 @@ public static class WakeWordDetector
         return LeaveMeetingPattern.IsMatch(recognizedText);
     }
 
+    public static bool IsSummaryExportRequest(
+        string? recognizedText)
+    {
+        if (string.IsNullOrWhiteSpace(recognizedText))
+        {
+            return false;
+        }
+
+        return SummaryExportPattern.IsMatch(recognizedText);
+    }
+
     /// <summary>
     /// True when the utterance names Agent Nova and includes a real request,
     /// not just a mention or filler like "Yeah, Agent Nova."
@@ -83,7 +105,8 @@ public static class WakeWordDetector
             return false;
         }
 
-        if (IsLeaveMeetingRequest(recognizedText))
+        if (IsLeaveMeetingRequest(recognizedText) ||
+            IsSummaryExportRequest(recognizedText))
         {
             return true;
         }
