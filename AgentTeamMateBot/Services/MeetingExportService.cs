@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 
 namespace AgentTeamMateBot.Services;
 
@@ -51,12 +52,17 @@ public class MeetingExportService
             ["transcript"] = transcript
         };
 
+        var requestJson = JsonSerializer.Serialize(payload);
+
         Console.WriteLine();
         Console.WriteLine("================================================");
-        Console.WriteLine(" MEETING EXPORT");
+        Console.WriteLine(" MEETING EXPORT REQUEST");
         Console.WriteLine("================================================");
         Console.WriteLine($"Call ID : {callId}");
-        Console.WriteLine($"Chars   : {transcript.Length}");
+        Console.WriteLine("POST    : Logic App Get_Meeting_Context_from_Bot");
+        Console.WriteLine("Body    :");
+        Console.WriteLine(requestJson);
+        Console.WriteLine("================================================");
 
         try
         {
