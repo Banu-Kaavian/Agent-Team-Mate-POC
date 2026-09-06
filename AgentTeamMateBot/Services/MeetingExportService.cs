@@ -1,4 +1,5 @@
-using System.Net.Http.Json;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 
 namespace AgentTeamMateBot.Services;
@@ -71,9 +72,17 @@ public class MeetingExportService
 
         try
         {
-            using var response = await _httpClient.PostAsJsonAsync(
-                logicAppUrl,
-                payload);
+            // Match Postman: raw JSON, Content-Type application/json (no charset).
+            // charset=utf-8 often makes Logic Apps return 202 with an empty transcript.
+            using var request = new HttpRequestMessage(HttpMethod.Post, logicAppUrl);
+            var content = new StringContent(requestJson, Encoding.UTF8);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            request.Content = content;
+
+            Console.WriteLine(
+                $"Content-Type: {request.Content.Headers.ContentType}");
+
+            using var response = await _httpClient.SendAsync(request);
 
             var body = await response.Content.ReadAsStringAsync();
             Console.WriteLine($"Status  : {(int)response.StatusCode} {response.StatusCode}");
