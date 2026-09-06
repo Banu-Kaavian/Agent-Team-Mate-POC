@@ -225,7 +225,8 @@ public class AiResponseService
         var system =
             "You write a meeting handoff document for a product workflow. " +
             "Output plain text only. No markdown headings with hashes, no bullet symbols if you can use numbered lines. " +
-            "First write a PRD-style summary: problem, goals, requirements, decisions, open questions, and action items. " +
+            "The first line must be exactly: TITLE: <short topic, 3 to 8 words>. " +
+            "Then write a PRD-style summary: problem, goals, requirements, decisions, open questions, and action items. " +
             "Then write a Transcript section as speaker lines exactly like: Name: sentence. " +
             "Use names when the notes include them. Otherwise use Participant. " +
             "Do not invent facts that are not in the notes. " +
