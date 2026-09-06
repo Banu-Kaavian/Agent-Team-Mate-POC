@@ -6,9 +6,9 @@ public static class WakeWordDetector
 {
     private static readonly Regex AgentInvocationPattern =
         new(
-            @"\b(?:hey\s+)?(?:agent\s+)?nova\b|" +
+            @"\b(?:hey\s+)?(?:agent\s+)?(?:nova|nover|noble|noha|nava|nova's)\b|" +
             @"\bajanova\b|" +
-            @"\bage(?:nt)?\s+(?:nova|nover|noble|nova's)\b",
+            @"\bage(?:nt)?\s+(?:nova|nover|noble|noha|nava|nova's)\b",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
