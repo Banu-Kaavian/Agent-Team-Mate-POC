@@ -1,6 +1,9 @@
 ﻿using System.Security.Cryptography.X509Certificates;
 using AgentTeamMateBot.Media;
 using AgentTeamMateBot.Services;
+using Microsoft.Bot.Builder;
+using Microsoft.Bot.Builder.Integration.AspNet.Core;
+using Microsoft.Bot.Connector.Authentication;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,6 +17,26 @@ builder.Configuration.AddJsonFile(
 // User secrets are Development-only by default. Load them whenever present
 // so `dotnet run` works even if ASPNETCORE_ENVIRONMENT is Production.
 builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);
+
+var botAppId =
+    builder.Configuration["Bot:ClientId"]
+    ?? builder.Configuration["ClientId"];
+var botAppSecret =
+    builder.Configuration["Bot:ClientSecret"]
+    ?? builder.Configuration["ClientSecret"];
+var botTenantId =
+    builder.Configuration["Bot:TenantId"]
+    ?? builder.Configuration["TenantId"];
+
+builder.Configuration.AddInMemoryCollection(
+    new Dictionary<string, string?>
+    {
+        ["MicrosoftAppType"] = "SingleTenant",
+        ["MicrosoftAppId"] = botAppId,
+        ["MicrosoftAppPassword"] = botAppSecret,
+        ["MicrosoftAppTenantId"] = botTenantId
+    });
+
 BotLog.Configure(builder.Configuration);
 
 Console.WriteLine($"Environment : {builder.Environment.EnvironmentName}");
@@ -102,6 +125,20 @@ builder.Services.AddSingleton<AudioHandler>();
 builder.Services.AddSingleton<MediaSessionService>();
 builder.Services.AddSingleton<AppHostedMediaService>();
 builder.Services.AddSingleton<MeetingMediaHandler>();
+builder.Services.AddSingleton<BotFrameworkAuthentication, ConfigurationBotFrameworkAuthentication>();
+builder.Services.AddSingleton<IBotFrameworkHttpAdapter>(sp =>
+{
+    var auth = sp.GetRequiredService<BotFrameworkAuthentication>();
+    var logger = sp.GetRequiredService<ILogger<CloudAdapter>>();
+    var adapter = new CloudAdapter(auth, logger);
+    adapter.OnTurnError = async (turnContext, exception) =>
+    {
+        Console.WriteLine($"[TEAMS CHAT] {exception}");
+        await turnContext.SendActivityAsync("Something went wrong handling that chat message.");
+    };
+    return adapter;
+});
+builder.Services.AddSingleton<IBot, TeamsChatBot>();
 
 var callbackUri =
     builder.Configuration["Bot:CallbackUri"]
@@ -270,6 +307,17 @@ app.MapGet(
 // ================================================================
 // MICROSOFT GRAPH CALLING CALLBACK
 // ================================================================
+
+app.MapPost(
+    "/api/messages",
+    async (
+        HttpRequest request,
+        HttpResponse response,
+        IBotFrameworkHttpAdapter adapter,
+        IBot bot) =>
+    {
+        await adapter.ProcessAsync(request, response, bot);
+    });
 
 app.MapPost(
     "/api/calling",
@@ -506,6 +554,7 @@ Console.WriteLine(" Agent Team Mate Bot Ready");
 Console.WriteLine($" Callback : {callbackUri}");
 Console.WriteLine(" Media    : SERVICE HOSTED  POST /api/join");
 Console.WriteLine(" Phase 2  : APP HOSTED      POST /api/join-apphosted");
+Console.WriteLine(" Chat     : TEAMS           POST /api/messages");
 Console.WriteLine("================================================");
 
 BotLog.Info("Ready. Waiting for a meeting join.");
