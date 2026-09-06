@@ -460,6 +460,43 @@ app.MapPost(
     });
 
 // ================================================================
+// TEST: GENERATE TRANSCRIPT AND POST TO LOGIC APP (NO TEAMS CALL)
+// ================================================================
+
+app.MapPost(
+    "/api/test-export",
+    async (
+        TestExportRequest? request,
+        MeetingExportService meetingExport) =>
+    {
+        var notes =
+            string.IsNullOrWhiteSpace(request?.Notes)
+                ? "Participant: We are building a Fiori app for purchase order monitoring.\n" +
+                  "Participant: Backend is S/4HANA public cloud. Deadline is two days.\n" +
+                  "Participant: Show PO status on a dashboard with pictorial KPIs.\n" +
+                  "Agent Nova: Use a Fiori List Report and Overview Page on the same OData service."
+                : request.Notes;
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" TEST EXPORT (NO TEAMS MEETING)");
+        Console.WriteLine("================================================");
+
+        var result = await meetingExport.ExportFromNotesAsync(
+            "test-export",
+            notes);
+
+        return Results.Ok(
+            new
+            {
+                result.Succeeded,
+                result.StatusCode,
+                result.Message,
+                RequestBody = result.RequestJson
+            });
+    });
+
+// ================================================================
 // START APPLICATION
 // ================================================================
 
@@ -498,4 +535,8 @@ public record JoinRequest(
     string? Passcode,
     string? OrganizerUserId = null,
     string? JoinWebUrl = null
+);
+
+public record TestExportRequest(
+    string? Notes
 );
