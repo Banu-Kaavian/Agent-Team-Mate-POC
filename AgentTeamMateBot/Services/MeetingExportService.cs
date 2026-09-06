@@ -54,15 +54,15 @@ public class MeetingExportService
 
         var requestJson = JsonSerializer.Serialize(payload);
 
-        Console.WriteLine();
-        Console.WriteLine("================================================");
-        Console.WriteLine(" MEETING EXPORT REQUEST");
-        Console.WriteLine("================================================");
-        Console.WriteLine($"Call ID : {callId}");
-        Console.WriteLine("POST    : Logic App Get_Meeting_Context_from_Bot");
-        Console.WriteLine("Body    :");
-        Console.WriteLine(requestJson);
-        Console.WriteLine("================================================");
+        //Console.WriteLine();
+        //Console.WriteLine("================================================");
+        //Console.WriteLine(" MEETING EXPORT REQUEST");
+        //Console.WriteLine("================================================");
+        //Console.WriteLine($"Call ID : {callId}");
+        //Console.WriteLine("POST    : Logic App Get_Meeting_Context_from_Bot");
+        //Console.WriteLine("Body    :");
+        //Console.WriteLine(requestJson);
+        //Console.WriteLine("================================================");
 
         try
         {
@@ -71,6 +71,8 @@ public class MeetingExportService
                 payload);
 
             var body = await response.Content.ReadAsStringAsync();
+            Console.WriteLine("MEETING EXPORT REQUEST BODY:");
+            Console.WriteLine(requestJson);
 
             Console.WriteLine($"Status  : {(int)response.StatusCode} {response.StatusCode}");
             if (!string.IsNullOrWhiteSpace(body))
