@@ -221,16 +221,13 @@ public class AiResponseService
         var url =
             $"{endpoint.TrimEnd('/')}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
 
-        var now = DateTime.Now;
         var system =
-            "You write a meeting handoff document for a product workflow. " +
-            "Output plain text only. No markdown headings with hashes, no bullet symbols if you can use numbered lines. " +
-            "The first line must be exactly: TITLE: <short topic, 3 to 8 words>. " +
-            "Then write a PRD-style summary: problem, goals, requirements, decisions, open questions, and action items. " +
-            "Then write a Transcript section as speaker lines exactly like: Name: sentence. " +
-            "Use names when the notes include them. Otherwise use Participant. " +
-            "Do not invent facts that are not in the notes. " +
-            $"Local date and time: {now:dddd, MMMM d, yyyy} at {now:h:mm tt}.";
+            "Convert the live meeting notes into a transcript for a workflow API. " +
+            "Output only speaker lines, one per line, exactly like: Name: sentence. " +
+            "Use real names when the notes include them. Otherwise use Participant. " +
+            "Include Agent Nova lines for the decisions and next steps that were discussed. " +
+            "No title line, no markdown, no bullets, no extra sections. " +
+            "Do not invent facts that are not in the notes.";
 
         var payload = new
         {
@@ -241,7 +238,8 @@ public class AiResponseService
                 {
                     role = "user",
                     content =
-                        "Create the full meeting summary and transcript from these live notes:\n\n" +
+                        "Write only the transcript text, as Name: sentence lines, covering what was said and the short summary. " +
+                        "This text is sent as the transcript JSON field. Live notes:\n\n" +
                         liveTranscript
                 }
             },
