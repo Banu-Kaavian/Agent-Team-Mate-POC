@@ -666,6 +666,9 @@ public class AppHostedMediaService
                 Console.WriteLine("================================================");
 
                 BotLog.Info($"Nova: {aiResponse}");
+                _meetingContextService.AppendLiveTranscript(
+                    callId,
+                    "Agent Nova: " + aiResponse);
 
                 var pcmAudio =
                     await SynthesizeSpeechToPcmAsync(aiResponse);

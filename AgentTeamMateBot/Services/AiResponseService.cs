@@ -222,12 +222,15 @@ public class AiResponseService
             $"{endpoint.TrimEnd('/')}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
 
         var system =
-            "Convert the live meeting notes into a transcript for a workflow API. " +
+            "You clean a live speech-to-text meeting log for a workflow API. " +
             "Output only speaker lines, one per line, exactly like: Name: sentence. " +
-            "Use real names when the notes include them. Otherwise use Participant. " +
-            "Include Agent Nova lines for the decisions and next steps that were discussed. " +
-            "No title line, no markdown, no bullets, no extra sections. " +
-            "Do not invent facts that are not in the notes.";
+            "Fix obvious speech-recognition spelling (names, SAP products, tools) without changing meaning. " +
+            "Examples: Agent Novak or Page and Nova become Agent Nova; S4 HANA becomes S/4HANA; duplicate words like BODS SAP BODS become SAP BODS. " +
+            "Use real people names from greetings when they appear; otherwise use Participant. " +
+            "Every Agent Nova: line already in the notes is a spoken answer. Copy those answers in full after the question they belong to. " +
+            "Do not replace Nova's answers with the leave or summarize command. " +
+            "Do not invent facts, tools, or decisions that are not in the notes. " +
+            "No title, markdown, bullets, or extra sections.";
 
         var payload = new
         {
@@ -238,8 +241,9 @@ public class AiResponseService
                 {
                     role = "user",
                     content =
-                        "Write only the transcript text, as Name: sentence lines, covering what was said and the short summary. " +
-                        "This text is sent as the transcript JSON field. Live notes:\n\n" +
+                        "Write the cleaned transcript as Name: sentence lines. " +
+                        "Keep all participant discussion and every Agent Nova answer. " +
+                        "This text is the transcript JSON field. Live notes:\n\n" +
                         liveTranscript
                 }
             },

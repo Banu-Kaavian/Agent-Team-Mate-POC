@@ -983,6 +983,9 @@ public class MediaSessionService
             "================================================");
 
         BotLog.Info($"Nova: {aiResponse}");
+        _meetingContextService.AppendLiveTranscript(
+            callId,
+            "Agent Nova: " + aiResponse);
 
         Console.WriteLine();
         Console.WriteLine(
