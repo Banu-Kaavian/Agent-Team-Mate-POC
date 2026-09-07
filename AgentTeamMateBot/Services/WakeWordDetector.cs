@@ -26,9 +26,13 @@ public static class WakeWordDetector
             @"\b(?:please\s+)?(?:" +
             @"quit|exit|leave|left|leaving|leaved|disconnect|hang\s*up|" +
             @"log\s*off|logoff|logout|log\s*out|" +
-            @"sign\s*off|sign\s*out|go\s+away|you\s+can\s+(?:go|leave|quit)|" +
-            @"get\s+out|end\s+(?:the\s+)?(?:call|meeting)|bye(?:\s+bye)?|goodbye|" +
-            @"(?:left|let|leave)\s+(?:the\s+)?(?:meeting|call)" +
+            @"sign\s*off|sign\s*out|go\s+away|" +
+            @"you\s+(?:can|may|should)\s+(?:go|leave|quit|exit)|" +
+            @"get\s+out|move\s+out|drop\s+(?:off|out)|" +
+            @"remove\s+(?:yourself|the\s+bot)|" +
+            @"end\s+(?:the\s+)?(?:call|meeting)|bye(?:\s+bye)?|goodbye|" +
+            @"(?:left|let|leave)\s+(?:the\s+)?(?:meeting|call)|" +
+            @"off\s+(?:the\s+)?(?:call|meeting)" +
             @")\b",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |

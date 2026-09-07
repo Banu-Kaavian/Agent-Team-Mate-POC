@@ -637,6 +637,12 @@ public class AiResponseService
         builder.Append(
             "No markdown, bullets, numbers, URLs, or symbols. Start with the answer. Do not invent meeting facts. ");
         builder.Append(
+            "If they ask what was said earlier, what we discussed before, previous points, or who said what, " +
+            "answer from the meeting transcript below. Restate those earlier points in plain speech. " +
+            "If it is not in the transcript, say you do not have that yet. ");
+        builder.Append(
+            "If they only asked for a summary, recap only. Do not mention the workflow. ");
+        builder.Append(
             $"The current local date and time is {now:dddd, MMMM d, yyyy} at {now:h:mm tt}.");
 
         builder.AppendLine();
