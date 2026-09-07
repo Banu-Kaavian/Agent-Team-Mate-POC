@@ -633,7 +633,7 @@ public class AppHostedMediaService
                 try
                 {
                     var pcm = await SynthesizeSpeechToPcmAsync(
-                        "I'm here. What are we looking at?"
+                        "I'm here. What are we looking at?");
                     if (pcm != null && pcm.Length > 0)
                     {
                         await SendPcmToAudioSocketAsync(callId, pcm);
