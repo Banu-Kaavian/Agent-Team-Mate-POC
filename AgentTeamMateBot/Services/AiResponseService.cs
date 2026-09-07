@@ -224,10 +224,15 @@ public class AiResponseService
         var system =
             "You clean a live speech-to-text meeting log for a workflow API. " +
             "Output only speaker lines, one per line, exactly like: Name: sentence. " +
-            "Fix obvious speech-recognition spelling (names, SAP products, tools) without changing meaning. " +
-            "Examples: Agent Novak or Page and Nova become Agent Nova; S4 HANA becomes S/4HANA; duplicate words like BODS SAP BODS become SAP BODS. " +
+            "Fix obvious speech-recognition spelling on Participant lines only " +
+            "(names, SAP products, tools) without changing meaning. " +
+            "Examples: Agent Novak or Page and Nova become Agent Nova; S4 HANA becomes S/4HANA; " +
+            "duplicate words like BODS SAP BODS become SAP BODS. " +
             "Use real people names from greetings when they appear; otherwise use Participant. " +
-            "Every Agent Nova: line already in the notes is a spoken answer. Copy those answers in full after the question they belong to. " +
+            "Agent Nova lines are already her full spoken answers, including APIs, BAPIs, OData, RFC, " +
+            "table names, field mappings, and every technical step. Copy each Agent Nova: line " +
+            "verbatim, word for word. Do not summarize, shorten, paraphrase, merge, or drop " +
+            "any technical detail from Nova. " +
             "Do not replace Nova's answers with the leave or summarize command. " +
             "Do not invent facts, tools, or decisions that are not in the notes. " +
             "No title, markdown, bullets, or extra sections.";
@@ -242,8 +247,8 @@ public class AiResponseService
                     role = "user",
                     content =
                         "Write the cleaned transcript as Name: sentence lines. " +
-                        "Keep all participant discussion and every Agent Nova answer. " +
-                        "This text is the transcript JSON field. Live notes:\n\n" +
+                        "Clean Participant speech. Paste every Agent Nova: line unchanged and in full, " +
+                        "including all technical content. This text is the transcript JSON field. Live notes:\n\n" +
                         liveTranscript
                 }
             },
@@ -296,9 +301,10 @@ public class AiResponseService
                 var text = ExtractMessageText(choice);
                 if (!string.IsNullOrWhiteSpace(text))
                 {
-                    Console.WriteLine($"Generated {text.Length} characters.");
+                    var preserved = PreserveAgentNovaAnswers(liveTranscript, text);
+                    Console.WriteLine($"Generated {preserved.Length} characters.");
                     Console.WriteLine("================================================");
-                    return text;
+                    return preserved;
                 }
             }
 
@@ -306,6 +312,47 @@ public class AiResponseService
             Console.WriteLine("================================================");
             return liveTranscript;
         }
+    }
+
+    private static string PreserveAgentNovaAnswers(string liveNotes, string cleanedTranscript)
+    {
+        var originalNova = liveNotes
+            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("Agent Nova:", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (originalNova.Count == 0)
+        {
+            return cleanedTranscript;
+        }
+
+        var outputLines = cleanedTranscript
+            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+            .ToList();
+
+        var novaIndex = 0;
+        for (var i = 0; i < outputLines.Count; i++)
+        {
+            if (!outputLines[i].TrimStart().StartsWith("Agent Nova:", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (novaIndex < originalNova.Count)
+            {
+                outputLines[i] = originalNova[novaIndex];
+                novaIndex++;
+            }
+        }
+
+        while (novaIndex < originalNova.Count)
+        {
+            outputLines.Add(originalNova[novaIndex]);
+            novaIndex++;
+        }
+
+        return string.Join(Environment.NewLine, outputLines.Where(line => !string.IsNullOrWhiteSpace(line)));
     }
 
     private static string? ExtractMessageText(JsonElement choice)
