@@ -44,7 +44,7 @@ public class TeamsChatBot : ActivityHandler
         ITurnContext<IMessageActivity> turnContext,
         CancellationToken cancellationToken)
     {
-        var text = turnContext.Activity.Text;
+        var text = GetJoinText(turnContext.Activity);
         Console.WriteLine();
         Console.WriteLine("================================================");
         Console.WriteLine(" TEAMS CHAT MESSAGE");
@@ -59,6 +59,8 @@ public class TeamsChatBot : ActivityHandler
                 cancellationToken);
             return;
         }
+
+        Console.WriteLine($"Parsed meetingId={meetingId} passcode={passcode}");
 
         if (!_appHostedMediaService.IsInitialized)
         {
@@ -121,12 +123,51 @@ public class TeamsChatBot : ActivityHandler
         });
     }
 
+    private static string GetJoinText(IMessageActivity activity)
+    {
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(activity.Text))
+        {
+            parts.Add(activity.Text);
+        }
+
+        if (!string.IsNullOrWhiteSpace(activity.Summary))
+        {
+            parts.Add(activity.Summary);
+        }
+
+        if (activity.Attachments != null)
+        {
+            foreach (var attachment in activity.Attachments)
+            {
+                if (!string.IsNullOrWhiteSpace(attachment.ContentUrl))
+                {
+                    parts.Add(attachment.ContentUrl);
+                }
+
+                if (!string.IsNullOrWhiteSpace(attachment.Name))
+                {
+                    parts.Add(attachment.Name);
+                }
+
+                if (attachment.Content != null)
+                {
+                    parts.Add(attachment.Content.ToString() ?? string.Empty);
+                }
+            }
+        }
+
+        return string.Join(Environment.NewLine, parts.Where(p => !string.IsNullOrWhiteSpace(p)));
+    }
+
     private static string HelpText()
     {
         return
-            "Send the meeting ID and passcode, for example:\n" +
-            "join 251 659 872 407 654 TA6QM9KL\n" +
-            "or\n" +
-            "Meeting ID: 251 659 872 407 654 Passcode: TA6QM9KL";
+            "Paste the Teams join invite, for example:\n" +
+            "Join: https://teams.microsoft.com/meet/251659872407654?p=pD0ef1v2FypexQJN3D\n" +
+            "Meeting ID: 251 659 872 407 654\n" +
+            "Passcode: TA6QM9KL\n" +
+            "You can also send only the link, or: join 251 659 872 407 654 TA6QM9KL";
     }
 }
