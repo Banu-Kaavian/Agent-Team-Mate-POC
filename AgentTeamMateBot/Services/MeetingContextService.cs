@@ -170,6 +170,12 @@ public class MeetingContextService
 
         var state = _liveTranscripts.GetOrAdd(callId, _ => new LiveTranscriptState());
 
+        if (WakeWordDetector.IsSkipWorkflowRequest(recognizedText))
+        {
+            state.SkipWorkflowExport = true;
+            Console.WriteLine("[MEETING CONTEXT] Workflow export disabled for this call.");
+        }
+
         lock (state.Gate)
         {
             if (state.Text.Length > 0)
@@ -189,6 +195,17 @@ public class MeetingContextService
 
             return state.Text.ToString();
         }
+    }
+
+    public bool ShouldSkipWorkflowExport(string callId)
+    {
+        if (string.IsNullOrWhiteSpace(callId) ||
+            !_liveTranscripts.TryGetValue(callId, out var state))
+        {
+            return false;
+        }
+
+        return state.SkipWorkflowExport;
     }
 
     public string? GetLiveTranscript(string callId)
@@ -776,6 +793,8 @@ public class MeetingContextService
     private sealed class LiveTranscriptState
     {
         public StringBuilder Text { get; } = new();
+
+        public bool SkipWorkflowExport { get; set; }
 
         public object Gate { get; } = new();
     }

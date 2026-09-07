@@ -841,7 +841,20 @@ public class MediaSessionService
             WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
         {
             BotLog.Info($"User: {recognizedText}");
-            BotLog.Info("Leaving meeting...");
+            var skipWorkflow =
+                WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
+                _meetingContextService.ShouldSkipWorkflowExport(callId);
+            if (!skipWorkflow)
+            {
+                BotLog.Info("Sending meeting transcript to workflow before leave...");
+                var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
+                await SpeakAsync(callId, spoken);
+            }
+            else
+            {
+                BotLog.Info("Leaving meeting without workflow export.");
+            }
+
             await LeaveMeetingAsync(callId);
             return;
         }
@@ -851,7 +864,8 @@ public class MediaSessionService
             !WakeWordDetector.IsActionableRequest(recognizedText))
         {
             Console.WriteLine(
-                $"[LISTEN] Ignoring casual Agent Nova mention: {recognizedText}");
+                $"[LISTEN] Agent Nova addressed: {recognizedText}");
+            await SpeakAsync(callId, "I'm here. What do you need?");
             return;
         }
 

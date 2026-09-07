@@ -6,9 +6,10 @@ public static class WakeWordDetector
 {
     private static readonly Regex AgentInvocationPattern =
         new(
-            @"\b(?:hey\s+)?(?:agent\s+)?(?:nova|nover|noble|noha|nava|nova's)\b|" +
+            @"\b(?:hey|hi|hello)\s+(?:there\s+)?(?:agent\s+)?(?:nova|nover|noble|noha|nava|noah|nower|nova's)\b|" +
+            @"\b(?:agent\s+)?(?:nova|nover|noble|noha|nava|noah|nower|nova's)\b|" +
             @"\bajanova\b|" +
-            @"\bage(?:nt)?\s+(?:nova|nover|noble|noha|nava|nova's)\b",
+            @"\bage(?:nt)?\s+(?:nova|nover|noble|noha|nava|noah|nower|nova's)\b",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
@@ -23,10 +24,23 @@ public static class WakeWordDetector
     private static readonly Regex LeaveMeetingPattern =
         new(
             @"\b(?:please\s+)?(?:" +
-            @"quit|exit|leave|disconnect|hang\s*up|log\s*off|logoff|logout|log\s*out|" +
+            @"quit|exit|leave|left|leaving|leaved|disconnect|hang\s*up|" +
+            @"log\s*off|logoff|logout|log\s*out|" +
             @"sign\s*off|sign\s*out|go\s+away|you\s+can\s+(?:go|leave|quit)|" +
-            @"get\s+out|end\s+(?:the\s+)?(?:call|meeting)|bye(?:\s+bye)?|goodbye" +
+            @"get\s+out|end\s+(?:the\s+)?(?:call|meeting)|bye(?:\s+bye)?|goodbye|" +
+            @"(?:left|let|leave)\s+(?:the\s+)?(?:meeting|call)" +
             @")\b",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static readonly Regex SkipWorkflowPattern =
+        new(
+            @"\b(?:do\s+not|don't|dont|never|skip|without|not\s+to|no\s+need\s+to)\s+" +
+            @"(?:call(?:ing)?\s+)?(?:the\s+)?(?:workflow|logic\s*app|export)\b|" +
+            @"\b(?:don't|do\s+not|dont)\s+(?:send|export|post)\b|" +
+            @"\bno\s+workflow\b|" +
+            @"\bskip\s+(?:the\s+)?(?:workflow|export)\b",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
@@ -91,6 +105,16 @@ public static class WakeWordDetector
         }
 
         return SummaryExportPattern.IsMatch(recognizedText);
+    }
+
+    public static bool IsSkipWorkflowRequest(string? recognizedText)
+    {
+        if (string.IsNullOrWhiteSpace(recognizedText))
+        {
+            return false;
+        }
+
+        return SkipWorkflowPattern.IsMatch(recognizedText);
     }
 
     /// <summary>
@@ -170,8 +194,7 @@ public static class WakeWordDetector
         var stripped =
             AgentInvocationPattern.Replace(
                 recognizedText,
-                " ",
-                1);
+                " ");
 
         stripped =
             LeftoverGreetingPattern.Replace(

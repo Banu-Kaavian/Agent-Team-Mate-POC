@@ -581,13 +581,7 @@ public class AppHostedMediaService
             {
                 try
                 {
-                    var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
-                    var pcm = await SynthesizeSpeechToPcmAsync(spoken);
-                    if (pcm != null && pcm.Length > 0)
-                    {
-                        await SendPcmToAudioSocketAsync(callId, pcm);
-                    }
-
+                    await SpeakExportResultAsync(callId);
                     if (leaveAfterExport)
                     {
                         await LeaveMeetingAsync(callId, sayGoodbye: true);
@@ -604,15 +598,34 @@ public class AppHostedMediaService
         if (WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
         {
             BotLog.Info($"User: {recognizedText}");
-            BotLog.Info("Leaving meeting...");
-            _ = Task.Run(async () => await LeaveMeetingAsync(callId, sayGoodbye: true));
+            var skipWorkflow =
+                WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
+                _meetingContextService.ShouldSkipWorkflowExport(callId);
+            _ = Task.Run(async () =>
+                await ExportThenLeaveAsync(callId, skipWorkflow));
             return;
         }
 
         if (!WakeWordDetector.IsActionableRequest(recognizedText))
         {
             Console.WriteLine(
-                $"[APP-HOSTED] Ignoring casual Agent Nova mention: {recognizedText}");
+                $"[APP-HOSTED] Agent Nova addressed: {recognizedText}");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var pcm = await SynthesizeSpeechToPcmAsync(
+                        "I'm here. What do you need?");
+                    if (pcm != null && pcm.Length > 0)
+                    {
+                        await SendPcmToAudioSocketAsync(callId, pcm);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[APP-HOSTED] Acknowledge failed: {ex.Message}");
+                }
+            });
             return;
         }
 
@@ -673,6 +686,38 @@ public class AppHostedMediaService
                     $"[APP-HOSTED] AI/TTS pipeline error: {ex.Message}");
             }
         });
+    }
+
+    private async Task ExportThenLeaveAsync(string callId, bool skipWorkflow)
+    {
+        try
+        {
+            if (skipWorkflow)
+            {
+                BotLog.Info("Leaving meeting without workflow export.");
+            }
+            else
+            {
+                BotLog.Info("Sending meeting transcript to workflow before leave...");
+                await SpeakExportResultAsync(callId);
+            }
+
+            await LeaveMeetingAsync(callId, sayGoodbye: true);
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Leave after export failed. {ex.Message}");
+        }
+    }
+
+    private async Task SpeakExportResultAsync(string callId)
+    {
+        var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
+        var pcm = await SynthesizeSpeechToPcmAsync(spoken);
+        if (pcm != null && pcm.Length > 0)
+        {
+            await SendPcmToAudioSocketAsync(callId, pcm);
+        }
     }
 
     private async Task LeaveMeetingAsync(string callId, bool sayGoodbye)
