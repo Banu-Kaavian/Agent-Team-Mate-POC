@@ -806,6 +806,14 @@ public class MediaSessionService
             WakeWordDetector.IsAgentInvocation(
                 recognizedText);
 
+        if (_meetingContextService.IsWorkflowConfirmationPending(callId) &&
+            (WakeWordDetector.IsShortAffirmative(recognizedText) ||
+             WakeWordDetector.IsShortNegative(recognizedText)))
+        {
+            await HandleWorkflowConfirmationReplyAsync(callId, recognizedText);
+            return;
+        }
+
         if (requireWakeWord && !invoked)
         {
             Console.WriteLine();
@@ -821,41 +829,45 @@ public class MediaSessionService
             return;
         }
 
+        var wantsRecap = WakeWordDetector.IsSpokenRecapRequest(recognizedText);
+        var wantsWorkflow = WakeWordDetector.IsWorkflowSendRequest(recognizedText);
+        var wantsLeave = WakeWordDetector.IsLeaveMeetingRequest(recognizedText);
+
         if ((!requireWakeWord || invoked) &&
-            WakeWordDetector.IsSummaryExportRequest(recognizedText))
+            wantsRecap && !wantsWorkflow && !wantsLeave)
         {
             BotLog.Info($"User: {recognizedText}");
-            BotLog.Info("Exporting meeting summary...");
-            var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
-            await SpeakAsync(callId, spoken);
-
-            if (WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
-            {
-                await LeaveMeetingAsync(callId);
-            }
-
+            BotLog.Info("Spoken recap only. Workflow not sent.");
+            await SpeakMeetingRecapAsync(callId);
             return;
         }
 
-        if (invoked &&
-            WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+        if ((!requireWakeWord || invoked) &&
+            wantsRecap && (wantsWorkflow || wantsLeave))
         {
             BotLog.Info($"User: {recognizedText}");
-            var skipWorkflow =
-                WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
-                _meetingContextService.ShouldSkipWorkflowExport(callId);
-            if (!skipWorkflow)
+            await SpeakMeetingRecapAsync(callId);
+            await AskWorkflowConfirmationAsync(callId, recognizedText, wantsLeave);
+            return;
+        }
+
+        if ((!requireWakeWord || invoked) && wantsWorkflow)
+        {
+            await AskWorkflowConfirmationAsync(callId, recognizedText, wantsLeave);
+            return;
+        }
+
+        if (invoked && wantsLeave)
+        {
+            BotLog.Info($"User: {recognizedText}");
+            if (WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
+                _meetingContextService.ShouldSkipWorkflowExport(callId))
             {
-                BotLog.Info("Sending meeting transcript to workflow before leave...");
-                var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
-                await SpeakAsync(callId, spoken);
-            }
-            else
-            {
-                BotLog.Info("Leaving meeting without workflow export.");
+                await LeaveMeetingAsync(callId);
+                return;
             }
 
-            await LeaveMeetingAsync(callId);
+            await AskWorkflowConfirmationAsync(callId, recognizedText, leaveAfter: true);
             return;
         }
 
@@ -865,7 +877,7 @@ public class MediaSessionService
         {
             Console.WriteLine(
                 $"[LISTEN] Agent Nova addressed: {recognizedText}");
-            await SpeakAsync(callId, "I'm here. What do you need?");
+            await SpeakAsync(callId, "I'm here. What are we looking at?");
             return;
         }
 
@@ -892,6 +904,67 @@ public class MediaSessionService
         await ProcessAgentResponseAsync(
             callId,
             question);
+    }
+
+    private async Task AskWorkflowConfirmationAsync(
+        string callId,
+        string recognizedText,
+        bool leaveAfter)
+    {
+        BotLog.Info($"User: {recognizedText}");
+        if (WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
+            _meetingContextService.ShouldSkipWorkflowExport(callId))
+        {
+            if (leaveAfter)
+            {
+                await LeaveMeetingAsync(callId);
+            }
+
+            return;
+        }
+
+        _meetingContextService.RequestWorkflowConfirmation(callId, leaveAfter);
+        var prompt = leaveAfter
+            ? "Can I send the meeting transcript to the workflow, then I will log off?"
+            : "Can I send the meeting transcript to the workflow?";
+        await SpeakAsync(callId, prompt);
+        _meetingContextService.AppendLiveTranscript(callId, "Agent Nova: " + prompt);
+    }
+
+    private async Task HandleWorkflowConfirmationReplyAsync(string callId, string recognizedText)
+    {
+        var leaveAfter = _meetingContextService.ShouldLeaveAfterWorkflowDecision(callId);
+        var send = WakeWordDetector.IsShortAffirmative(recognizedText) &&
+                   !WakeWordDetector.IsShortNegative(recognizedText);
+        _meetingContextService.ClearWorkflowConfirmation(callId);
+
+        BotLog.Info($"User: {recognizedText}");
+        if (send)
+        {
+            BotLog.Info("Workflow confirmed. Sending transcript.");
+            var spoken = await _meetingExportService.ExportMeetingSummaryAsync(callId);
+            await SpeakAsync(callId, spoken);
+            if (leaveAfter)
+            {
+                await LeaveMeetingAsync(callId);
+            }
+
+            return;
+        }
+
+        BotLog.Info("Workflow declined.");
+        await SpeakAsync(callId, "Okay. I will not send it to the workflow.");
+        if (leaveAfter)
+        {
+            await LeaveMeetingAsync(callId);
+        }
+    }
+
+    private async Task SpeakMeetingRecapAsync(string callId)
+    {
+        var recap = await _aiResponseService.GenerateSpokenRecapAsync(callId);
+        await SpeakAsync(callId, recap);
+        _meetingContextService.AppendLiveTranscript(callId, "Agent Nova: " + recap);
     }
 
     private async Task SpeakAsync(string callId, string text)

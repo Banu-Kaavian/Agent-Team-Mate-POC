@@ -208,6 +208,54 @@ public class MeetingContextService
         return state.SkipWorkflowExport;
     }
 
+    public void RequestWorkflowConfirmation(string callId, bool leaveAfter)
+    {
+        if (string.IsNullOrWhiteSpace(callId))
+        {
+            return;
+        }
+
+        var state = _liveTranscripts.GetOrAdd(callId, _ => new LiveTranscriptState());
+        state.PendingWorkflowConfirmation = true;
+        state.LeaveAfterWorkflowDecision = leaveAfter;
+        Console.WriteLine(
+            $"[MEETING CONTEXT] Waiting for workflow confirmation. Leave after={leaveAfter}");
+    }
+
+    public bool IsWorkflowConfirmationPending(string callId)
+    {
+        if (string.IsNullOrWhiteSpace(callId) ||
+            !_liveTranscripts.TryGetValue(callId, out var state))
+        {
+            return false;
+        }
+
+        return state.PendingWorkflowConfirmation;
+    }
+
+    public bool ShouldLeaveAfterWorkflowDecision(string callId)
+    {
+        if (string.IsNullOrWhiteSpace(callId) ||
+            !_liveTranscripts.TryGetValue(callId, out var state))
+        {
+            return false;
+        }
+
+        return state.LeaveAfterWorkflowDecision;
+    }
+
+    public void ClearWorkflowConfirmation(string callId)
+    {
+        if (string.IsNullOrWhiteSpace(callId) ||
+            !_liveTranscripts.TryGetValue(callId, out var state))
+        {
+            return;
+        }
+
+        state.PendingWorkflowConfirmation = false;
+        state.LeaveAfterWorkflowDecision = false;
+    }
+
     public string? GetLiveTranscript(string callId)
     {
         if (string.IsNullOrWhiteSpace(callId) ||
@@ -795,6 +843,10 @@ public class MeetingContextService
         public StringBuilder Text { get; } = new();
 
         public bool SkipWorkflowExport { get; set; }
+
+        public bool PendingWorkflowConfirmation { get; set; }
+
+        public bool LeaveAfterWorkflowDecision { get; set; }
 
         public object Gate { get; } = new();
     }

@@ -45,13 +45,40 @@ public static class WakeWordDetector
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
 
-    private static readonly Regex SummaryExportPattern =
+    private static readonly Regex SpokenRecapPattern =
         new(
-            @"\b(?:full\s+)?(?:summary|summarize|summarise|summarization|recap|transcript)\b|" +
+            @"\b(?:full\s+)?(?:summary|summarize|summarise|summarization|recap)\b|" +
             @"\bprd\b|" +
             @"\bproduct\s+requirements?\b|" +
-            @"\bmeeting\s+(?:notes|document|summary|transcript)\b|" +
-            @"\bsend\s+(?:the\s+)?(?:summary|transcript|prd|notes|document)\b",
+            @"\bmeeting\s+(?:notes|document|summary|recap)\b",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static readonly Regex WorkflowSendPattern =
+        new(
+            @"\bsend\s+(?:it\s+|the\s+)?(?:to\s+)?(?:the\s+)?workflow\b|" +
+            @"\bcall(?:ing)?\s+(?:the\s+)?workflow\b|" +
+            @"\bexport\s+(?:to\s+)?(?:the\s+)?workflow\b|" +
+            @"\bpost\s+(?:to\s+)?(?:the\s+)?workflow\b|" +
+            @"\bsend\s+(?:the\s+)?(?:meeting\s+)?(?:transcript|notes|summary)\s+to\b|" +
+            @"\bsend\s+(?:the\s+)?transcript\b",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static readonly Regex AffirmativePattern =
+        new(
+            @"^\s*(?:yes|yeah|yep|yup|ok|okay|sure|please|go\s+ahead|send\s+it|do\s+it|confirm)" +
+            @"(?:\s+please)?(?:\s|,|\.|!|\?)*\s*$",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static readonly Regex NegativePattern =
+        new(
+            @"^\s*(?:no|nope|don't|dont|do\s+not|not\s+now|skip(?:\s+it)?|cancel)" +
+            @"(?:\s+please)?(?:\s|,|\.|!|\?)*\s*$",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
@@ -96,15 +123,52 @@ public static class WakeWordDetector
         return LeaveMeetingPattern.IsMatch(recognizedText);
     }
 
-    public static bool IsSummaryExportRequest(
-        string? recognizedText)
+    public static bool IsSpokenRecapRequest(string? recognizedText)
     {
         if (string.IsNullOrWhiteSpace(recognizedText))
         {
             return false;
         }
 
-        return SummaryExportPattern.IsMatch(recognizedText);
+        return SpokenRecapPattern.IsMatch(recognizedText);
+    }
+
+    public static bool IsWorkflowSendRequest(string? recognizedText)
+    {
+        if (string.IsNullOrWhiteSpace(recognizedText))
+        {
+            return false;
+        }
+
+        return WorkflowSendPattern.IsMatch(recognizedText);
+    }
+
+    public static bool IsShortAffirmative(string? recognizedText)
+    {
+        return IsShortReply(recognizedText, AffirmativePattern);
+    }
+
+    public static bool IsShortNegative(string? recognizedText)
+    {
+        return IsSkipWorkflowRequest(recognizedText) ||
+               IsShortReply(recognizedText, NegativePattern);
+    }
+
+    private static bool IsShortReply(string? recognizedText, Regex pattern)
+    {
+        if (string.IsNullOrWhiteSpace(recognizedText) ||
+            recognizedText.Trim().Length > 80)
+        {
+            return false;
+        }
+
+        var stripped = RemoveActivationPhrase(recognizedText);
+        if (string.IsNullOrWhiteSpace(stripped))
+        {
+            stripped = recognizedText;
+        }
+
+        return pattern.IsMatch(stripped.Trim());
     }
 
     public static bool IsSkipWorkflowRequest(string? recognizedText)
@@ -130,7 +194,8 @@ public static class WakeWordDetector
         }
 
         if (IsLeaveMeetingRequest(recognizedText) ||
-            IsSummaryExportRequest(recognizedText))
+            IsSpokenRecapRequest(recognizedText) ||
+            IsWorkflowSendRequest(recognizedText))
         {
             return true;
         }

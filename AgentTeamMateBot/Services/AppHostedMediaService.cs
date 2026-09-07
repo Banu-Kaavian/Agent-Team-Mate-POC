@@ -567,42 +567,60 @@ public class AppHostedMediaService
         _meetingContextService.AppendLiveTranscript(
             callId, recognizedText);
 
+        if (_meetingContextService.IsWorkflowConfirmationPending(callId) &&
+            (WakeWordDetector.IsShortAffirmative(recognizedText) ||
+             WakeWordDetector.IsShortNegative(recognizedText)))
+        {
+            HandleWorkflowConfirmationReply(callId, recognizedText);
+            return;
+        }
+
         if (!WakeWordDetector.IsAgentInvocation(recognizedText))
         {
             return;
         }
 
-        if (WakeWordDetector.IsSummaryExportRequest(recognizedText))
+        var wantsRecap = WakeWordDetector.IsSpokenRecapRequest(recognizedText);
+        var wantsWorkflow = WakeWordDetector.IsWorkflowSendRequest(recognizedText);
+        var wantsLeave = WakeWordDetector.IsLeaveMeetingRequest(recognizedText);
+
+        if (wantsRecap && !wantsWorkflow && !wantsLeave)
         {
             BotLog.Info($"User: {recognizedText}");
-            BotLog.Info("Exporting meeting summary...");
-            var leaveAfterExport = WakeWordDetector.IsLeaveMeetingRequest(recognizedText);
+            BotLog.Info("Spoken recap only. Workflow not sent.");
+            _ = Task.Run(async () => await SpeakMeetingRecapAsync(callId));
+            return;
+        }
+
+        if (wantsRecap && (wantsWorkflow || wantsLeave))
+        {
+            BotLog.Info($"User: {recognizedText}");
             _ = Task.Run(async () =>
             {
-                try
-                {
-                    await SpeakExportResultAsync(callId);
-                    if (leaveAfterExport)
-                    {
-                        await LeaveMeetingAsync(callId, sayGoodbye: true);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    BotLog.Info($"Error: Meeting export failed. {ex.Message}");
-                }
+                await SpeakMeetingRecapAsync(callId);
+                AskWorkflowConfirmation(callId, recognizedText, leaveAfter: wantsLeave);
             });
             return;
         }
 
-        if (WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+        if (wantsWorkflow)
+        {
+            AskWorkflowConfirmation(callId, recognizedText, leaveAfter: wantsLeave);
+            return;
+        }
+
+        if (wantsLeave)
         {
             BotLog.Info($"User: {recognizedText}");
-            var skipWorkflow =
-                WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
-                _meetingContextService.ShouldSkipWorkflowExport(callId);
-            _ = Task.Run(async () =>
-                await ExportThenLeaveAsync(callId, skipWorkflow));
+            if (WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
+                _meetingContextService.ShouldSkipWorkflowExport(callId))
+            {
+                _ = Task.Run(async () =>
+                    await LeaveMeetingAsync(callId, sayGoodbye: true));
+                return;
+            }
+
+            AskWorkflowConfirmation(callId, recognizedText, leaveAfter: true);
             return;
         }
 
@@ -615,7 +633,7 @@ public class AppHostedMediaService
                 try
                 {
                     var pcm = await SynthesizeSpeechToPcmAsync(
-                        "I'm here. What do you need?");
+                        "I'm here. What are we looking at?"
                     if (pcm != null && pcm.Length > 0)
                     {
                         await SendPcmToAudioSocketAsync(callId, pcm);
@@ -689,6 +707,91 @@ public class AppHostedMediaService
                     $"[APP-HOSTED] AI/TTS pipeline error: {ex.Message}");
             }
         });
+    }
+
+    private void AskWorkflowConfirmation(string callId, string recognizedText, bool leaveAfter)
+    {
+        BotLog.Info($"User: {recognizedText}");
+        if (WakeWordDetector.IsSkipWorkflowRequest(recognizedText) ||
+            _meetingContextService.ShouldSkipWorkflowExport(callId))
+        {
+            if (leaveAfter)
+            {
+                _ = Task.Run(async () => await LeaveMeetingAsync(callId, sayGoodbye: true));
+            }
+
+            return;
+        }
+
+        _meetingContextService.RequestWorkflowConfirmation(callId, leaveAfter);
+        var prompt = leaveAfter
+            ? "Can I send the meeting transcript to the workflow, then I will log off?"
+            : "Can I send the meeting transcript to the workflow?";
+        _ = Task.Run(async () =>
+        {
+            await SpeakAndRecordAsync(callId, prompt);
+        });
+    }
+
+    private void HandleWorkflowConfirmationReply(string callId, string recognizedText)
+    {
+        var leaveAfter = _meetingContextService.ShouldLeaveAfterWorkflowDecision(callId);
+        var send = WakeWordDetector.IsShortAffirmative(recognizedText) &&
+                   !WakeWordDetector.IsShortNegative(recognizedText);
+        _meetingContextService.ClearWorkflowConfirmation(callId);
+
+        BotLog.Info($"User: {recognizedText}");
+        if (send)
+        {
+            BotLog.Info("Workflow confirmed. Sending transcript.");
+            _ = Task.Run(async () =>
+            {
+                await SpeakExportResultAsync(callId);
+                if (leaveAfter)
+                {
+                    await LeaveMeetingAsync(callId, sayGoodbye: true);
+                }
+            });
+            return;
+        }
+
+        BotLog.Info("Workflow declined.");
+        _ = Task.Run(async () =>
+        {
+            await SpeakAndRecordAsync(callId, "Okay. I will not send it to the workflow.");
+            if (leaveAfter)
+            {
+                await LeaveMeetingAsync(callId, sayGoodbye: true);
+            }
+        });
+    }
+
+    private async Task SpeakMeetingRecapAsync(string callId)
+    {
+        try
+        {
+            var recap = await _aiResponseService.GenerateSpokenRecapAsync(callId);
+            await SpeakAndRecordAsync(callId, recap);
+        }
+        catch (Exception ex)
+        {
+            BotLog.Info($"Error: Meeting recap failed. {ex.Message}");
+        }
+    }
+
+    private async Task SpeakAndRecordAsync(string callId, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        _meetingContextService.AppendLiveTranscript(callId, "Agent Nova: " + text);
+        var pcm = await SynthesizeSpeechToPcmAsync(text);
+        if (pcm != null && pcm.Length > 0)
+        {
+            await SendPcmToAudioSocketAsync(callId, pcm);
+        }
     }
 
     private async Task ExportThenLeaveAsync(string callId, bool skipWorkflow)

@@ -314,6 +314,104 @@ public class AiResponseService
         }
     }
 
+    public async Task<string> GenerateSpokenRecapAsync(string callId)
+    {
+        var liveTranscript = _meetingContextService.GetLiveTranscript(callId);
+        if (string.IsNullOrWhiteSpace(liveTranscript))
+        {
+            return "I do not have enough of the meeting yet to recap.";
+        }
+
+        var endpoint = _configuration["AzureOpenAI:Endpoint"];
+        var deployment = _configuration["AzureOpenAI:Deployment"]
+            ?? _configuration["OPENAI_MODEL"];
+        var apiKey = _configuration["AzureOpenAI:ApiKey"]
+            ?? _configuration["OPENAI_API_KEY"];
+
+        if (string.IsNullOrWhiteSpace(endpoint) ||
+            string.IsNullOrWhiteSpace(deployment) ||
+            string.IsNullOrWhiteSpace(apiKey))
+        {
+            return "I cannot recap yet. Azure OpenAI is not configured.";
+        }
+
+        var apiVersion =
+            _configuration["AzureOpenAI:ApiVersion"]
+            ?? "2025-01-01-preview";
+
+        var url =
+            $"{endpoint.TrimEnd('/')}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
+
+        var system =
+            "You are Agent Nova recapping this Teams meeting out loud. " +
+            "Give a simple spoken recap only. Do not offer to send a workflow. " +
+            "Focus on the technical points: products, versions, APIs, BAPIs, OData, RFC, tools, " +
+            "objects, and decisions that were actually discussed. " +
+            "Keep Agent Nova's technical recommendations. " +
+            "Use four to eight short sentences. No markdown, bullets, or URLs. " +
+            "Do not invent facts.";
+
+        var payload = new
+        {
+            messages = new object[]
+            {
+                new { role = "system", content = system },
+                new
+                {
+                    role = "user",
+                    content = "Recap this meeting for the people on the call:\n\n" + liveTranscript
+                }
+            },
+            max_completion_tokens = 700,
+            reasoning_effort = "minimal"
+        };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Add("api-key", apiKey);
+        request.Content = new StringContent(
+            JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json");
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" GENERATING SPOKEN MEETING RECAP");
+        Console.WriteLine("================================================");
+
+        try
+        {
+            using var response = await _documentHttpClient.SendAsync(request);
+            var body = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"[MEETING RECAP] Azure OpenAI {(int)response.StatusCode}");
+                return "I could not build the recap. Please try again.";
+            }
+
+            using var document = JsonDocument.Parse(body);
+            if (!document.RootElement.TryGetProperty("choices", out var choices) ||
+                choices.ValueKind != JsonValueKind.Array)
+            {
+                return "I could not build the recap. Please try again.";
+            }
+
+            foreach (var choice in choices.EnumerateArray())
+            {
+                var text = ExtractMessageText(choice);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    return text.Trim();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MEETING RECAP] {ex.Message}");
+        }
+
+        return "I could not build the recap. Please try again.";
+    }
+
     private static string PreserveAgentNovaAnswers(string liveNotes, string cleanedTranscript)
     {
         var originalNova = liveNotes
@@ -525,9 +623,13 @@ public class AiResponseService
         builder.Append(
             "You are Agent Nova, a teammate in this Microsoft Teams meeting with SAP technical and functional experience. ");
         builder.Append(
-            "Talk like a colleague sharing a suggestion or knowledge, not like a project manager. ");
+            "Talk like a colleague on the call, not like a project manager or a help desk script. ");
         builder.Append(
             "Give a direct answer in two or three short spoken sentences. Never more than four sentences. ");
+        builder.Append(
+            "Then ask one simple teammate question when it helps, such as what they already tried, which object, " +
+            "which system, volume, timeline, or whether they want you to go deeper. " +
+            "Ask only one question. Do not interview them. Skip the question if the transcript already answered it. ");
         builder.Append(
             "Do not say next step, next steps, or give a plan unless someone asks what to do next or asks for a plan. ");
         builder.Append(
