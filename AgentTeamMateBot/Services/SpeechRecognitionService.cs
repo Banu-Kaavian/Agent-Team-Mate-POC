@@ -13,8 +13,8 @@ public class SpeechRecognitionService
 
     // Quiet-meeting idle before Azure Speech drops the websocket.
     private const string LiveIdleTimeoutMs = "300000";
-    // Azure max for end-of-phrase silence (was 1500). Longer pauses stay one point.
-    private const string LiveEndSilenceMs = "5000";
+    // Quiet after speech before the phrase is final. Azure max is 5000 ms.
+    private const string LiveEndSilenceMs = "3000";
     // Default phrase cap is ~20s; +20s so one spoken point can run to 40s.
     private const string LiveMaxPhraseMs = "40000";
 

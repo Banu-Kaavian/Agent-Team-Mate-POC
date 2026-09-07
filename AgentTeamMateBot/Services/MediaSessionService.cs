@@ -548,7 +548,7 @@ public class MediaSessionService
 
                     maxSilenceTimeoutInSeconds =
                         _configuration.GetValue(
-                            "Recording:SilenceTimeoutSeconds", 1),
+                            "Recording:SilenceTimeoutSeconds", 3),
 
                     playBeep =
                         _configuration.GetValue(

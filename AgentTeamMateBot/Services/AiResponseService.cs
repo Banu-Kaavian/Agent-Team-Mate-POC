@@ -21,7 +21,7 @@ public class AiResponseService
         _configuration = configuration;
         _meetingContextService = meetingContextService;
         _httpClient = new HttpClient();
-        _httpClient.Timeout = TimeSpan.FromSeconds(20);
+        _httpClient.Timeout = TimeSpan.FromSeconds(45);
         _documentHttpClient = new HttpClient();
         _documentHttpClient.Timeout = TimeSpan.FromSeconds(90);
     }
