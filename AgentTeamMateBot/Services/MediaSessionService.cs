@@ -540,7 +540,7 @@ public class MediaSessionService
 
                     maxRecordDurationInSeconds =
                         _configuration.GetValue(
-                            "Recording:MaxDurationSeconds", 5),
+                            "Recording:MaxDurationSeconds", 40),
 
                     initialSilenceTimeoutInSeconds =
                         _configuration.GetValue(

@@ -36,17 +36,18 @@ public class AudioHandler
         if (!isSilence)
         {
             var livePacket = Interlocked.Increment(ref _livePacketCount);
-            if (livePacket == 1 || livePacket % 50 == 0)
+            if (_speechService.IsListening)
             {
-                Console.WriteLine();
-                Console.WriteLine("================================================");
-                Console.WriteLine(" LIVE TEAMS AUDIO RECEIVED");
-                Console.WriteLine("================================================");
-                Console.WriteLine($"Call ID    : {callId}");
-                Console.WriteLine($"Bytes      : {data.Length}");
-                Console.WriteLine($"Timestamp  : {timestamp}");
-                Console.WriteLine($"Format     : {audioFormat}");
-                Console.WriteLine("================================================");
+                if (livePacket == 1 || livePacket % 250 == 0)
+                {
+                    Console.WriteLine(
+                        $"[AUDIO] Live PCM to Speech ({data.Length} bytes, call {callId}, ts {timestamp}).");
+                }
+            }
+            else if (livePacket == 1 || livePacket % 250 == 0)
+            {
+                Console.WriteLine(
+                    "[AUDIO] Teams audio received, waiting for Speech session to restart.");
             }
         }
 

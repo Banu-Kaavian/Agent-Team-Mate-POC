@@ -11,6 +11,13 @@ public class SpeechRecognitionService
     public const int SpeechBitsPerSample = 16;
     public const int SpeechChannels = 1;
 
+    // Quiet-meeting idle before Azure Speech drops the websocket.
+    private const string LiveIdleTimeoutMs = "300000";
+    // Azure max for end-of-phrase silence (was 1500). Longer pauses stay one point.
+    private const string LiveEndSilenceMs = "5000";
+    // Default phrase cap is ~20s; +20s so one spoken point can run to 40s.
+    private const string LiveMaxPhraseMs = "40000";
+
     public SpeechRecognitionService(
         IConfiguration configuration)
     {
@@ -18,12 +25,18 @@ public class SpeechRecognitionService
             configuration;
     }
 
-    private readonly object _liveLock = new();
+    private readonly SemaphoreSlim _liveGate = new(1, 1);
     private SpeechRecognizer? _liveRecognizer;
     private PushAudioInputStream? _livePushStream;
-    private bool _liveStarted;
+    private AudioConfig? _liveAudioConfig;
+    private volatile bool _wantLive;
+    private volatile bool _acceptingAudio;
+    private int _restartQueued;
+    private int _restartFailures;
 
     public event Action<string>? OnSpeechRecognized;
+
+    public bool IsListening => _acceptingAudio;
 
     // ============================================================
     // PHASE 2: CONTINUOUS LIVE PCM FROM AUDIOSOCKET
@@ -32,124 +45,25 @@ public class SpeechRecognitionService
 
     public async Task StartAsync()
     {
-        lock (_liveLock)
+        _wantLive = true;
+        await _liveGate.WaitAsync();
+        try
         {
-            if (_liveStarted)
+            if (_liveRecognizer != null && _acceptingAudio)
             {
                 return;
             }
 
-            _liveStarted = true;
-        }
-
-        try
-        {
-            var key =
-                _configuration["Speech:Key"]
-                ?? _configuration["AZURE_SPEECH_KEY"];
-
-            var region =
-                _configuration["Speech:Region"]
-                ?? _configuration["AZURE_SPEECH_REGION"];
-
-            if (string.IsNullOrWhiteSpace(key))
+            if (_liveRecognizer != null)
             {
-                throw new Exception("Speech:Key missing");
+                await TearDownLiveAsync();
             }
 
-            if (string.IsNullOrWhiteSpace(region))
-            {
-                throw new Exception("Speech:Region missing");
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("================================================");
-            Console.WriteLine(" LIVE AZURE SPEECH STARTING");
-            Console.WriteLine("================================================");
-            Console.WriteLine($"Speech region : {region}");
-            Console.WriteLine("Input         : 16 kHz 16-bit mono PCM push stream");
-            Console.WriteLine("================================================");
-
-            var speechConfig =
-                SpeechConfig.FromSubscription(
-                    key,
-                    region);
-
-            speechConfig.SpeechRecognitionLanguage =
-                "en-US";
-
-            var format =
-                AudioStreamFormat.GetWaveFormatPCM(
-                    SpeechSampleRate,
-                    SpeechBitsPerSample,
-                    SpeechChannels);
-
-            _livePushStream =
-                AudioInputStream.CreatePushStream(
-                    format);
-
-            var audioConfig =
-                AudioConfig.FromStreamInput(
-                    _livePushStream);
-
-            _liveRecognizer =
-                new SpeechRecognizer(
-                    speechConfig,
-                    audioConfig);
-
-            _liveRecognizer.Recognized +=
-                (_, e) =>
-                {
-                    if (e.Result.Reason ==
-                            ResultReason.RecognizedSpeech &&
-                        !string.IsNullOrWhiteSpace(
-                            e.Result.Text))
-                    {
-                        Console.WriteLine();
-                        Console.WriteLine("================================================");
-                        Console.WriteLine(" LIVE SPEECH");
-                        Console.WriteLine("================================================");
-                        Console.WriteLine(e.Result.Text);
-                        Console.WriteLine("================================================");
-
-                        try
-                        {
-                            OnSpeechRecognized?.Invoke(e.Result.Text);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine(
-                                $"[LIVE SPEECH] Callback error: {ex.Message}");
-                        }
-                    }
-                };
-
-            _liveRecognizer.Canceled +=
-                (_, e) =>
-                {
-                    Console.WriteLine();
-                    Console.WriteLine("================================================");
-                    Console.WriteLine(" LIVE SPEECH SDK FAILURE");
-                    Console.WriteLine("================================================");
-                    Console.WriteLine($"Reason        : {e.Reason}");
-                    Console.WriteLine($"Error code    : {e.ErrorCode}");
-                    Console.WriteLine($"Error details : {e.ErrorDetails}");
-                    Console.WriteLine("================================================");
-                };
-
-            await _liveRecognizer
-                .StartContinuousRecognitionAsync();
-
-            Console.WriteLine(
-                "Live Azure Speech continuous recognition started.");
+            await CreateAndStartLiveAsync();
         }
         catch (Exception ex)
         {
-            lock (_liveLock)
-            {
-                _liveStarted = false;
-            }
-
+            _acceptingAudio = false;
             Console.WriteLine();
             Console.WriteLine("================================================");
             Console.WriteLine(" LIVE SPEECH SDK FAILURE");
@@ -158,34 +72,309 @@ public class SpeechRecognitionService
             Console.WriteLine(ex);
             throw;
         }
+        finally
+        {
+            _liveGate.Release();
+        }
     }
 
     public void ProcessAudio(
         byte[] audioData)
     {
-        if (_livePushStream == null)
-        {
-            return;
-        }
-
-        if (audioData == null ||
+        if (!_acceptingAudio ||
+            _livePushStream == null ||
+            audioData == null ||
             audioData.Length == 0)
         {
             return;
         }
 
-        _livePushStream.Write(audioData);
+        try
+        {
+            _livePushStream.Write(audioData);
+        }
+        catch (Exception ex)
+        {
+            _acceptingAudio = false;
+            Console.WriteLine(
+                $"[LIVE SPEECH] Push stream write failed: {ex.Message}");
+            QueueLiveRestart();
+        }
     }
 
     public async Task StopAsync()
     {
-        if (_liveRecognizer != null)
+        _wantLive = false;
+        _acceptingAudio = false;
+        await _liveGate.WaitAsync();
+        try
         {
-            await _liveRecognizer
-                .StopContinuousRecognitionAsync();
+            await TearDownLiveAsync();
+        }
+        finally
+        {
+            _liveGate.Release();
+        }
+    }
+
+    private async Task CreateAndStartLiveAsync()
+    {
+        var key =
+            _configuration["Speech:Key"]
+            ?? _configuration["AZURE_SPEECH_KEY"];
+
+        var region =
+            _configuration["Speech:Region"]
+            ?? _configuration["AZURE_SPEECH_REGION"];
+
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new Exception("Speech:Key missing");
         }
 
-        _livePushStream?.Close();
+        if (string.IsNullOrWhiteSpace(region))
+        {
+            throw new Exception("Speech:Region missing");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("================================================");
+        Console.WriteLine(" LIVE AZURE SPEECH STARTING");
+        Console.WriteLine("================================================");
+        Console.WriteLine($"Speech region : {region}");
+        Console.WriteLine($"Idle timeout : {int.Parse(LiveIdleTimeoutMs) / 1000} seconds");
+        Console.WriteLine($"End silence  : {int.Parse(LiveEndSilenceMs)} ms");
+        Console.WriteLine($"Max phrase   : {int.Parse(LiveMaxPhraseMs) / 1000} seconds");
+        Console.WriteLine("================================================");
+
+        var speechConfig = CreateLiveRecognitionConfig(key, region);
+        var format = AudioStreamFormat.GetWaveFormatPCM(
+            SpeechSampleRate,
+            SpeechBitsPerSample,
+            SpeechChannels);
+
+        _livePushStream = AudioInputStream.CreatePushStream(format);
+        _liveAudioConfig = AudioConfig.FromStreamInput(_livePushStream);
+        var recognizer = new SpeechRecognizer(speechConfig, _liveAudioConfig);
+        _liveRecognizer = recognizer;
+
+        recognizer.SessionStarted += (_, _) =>
+        {
+            if (!ReferenceEquals(_liveRecognizer, recognizer))
+            {
+                return;
+            }
+
+            _acceptingAudio = true;
+            _restartFailures = 0;
+            Console.WriteLine("Live Azure Speech session started.");
+        };
+
+        recognizer.SessionStopped += (_, _) =>
+        {
+            if (!ReferenceEquals(_liveRecognizer, recognizer))
+            {
+                return;
+            }
+
+            _acceptingAudio = false;
+            Console.WriteLine("Live Azure Speech session stopped.");
+            QueueLiveRestart();
+        };
+
+        recognizer.Recognized += (_, e) =>
+        {
+            if (!ReferenceEquals(_liveRecognizer, recognizer))
+            {
+                return;
+            }
+
+            if (e.Result.Reason != ResultReason.RecognizedSpeech ||
+                string.IsNullOrWhiteSpace(e.Result.Text))
+            {
+                return;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" LIVE SPEECH");
+            Console.WriteLine("================================================");
+            Console.WriteLine(e.Result.Text);
+            Console.WriteLine("================================================");
+
+            try
+            {
+                OnSpeechRecognized?.Invoke(e.Result.Text);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[LIVE SPEECH] Callback error: {ex.Message}");
+            }
+        };
+
+        recognizer.Canceled += (_, e) =>
+        {
+            if (!ReferenceEquals(_liveRecognizer, recognizer))
+            {
+                return;
+            }
+
+            _acceptingAudio = false;
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" LIVE SPEECH SDK FAILURE");
+            Console.WriteLine("================================================");
+            Console.WriteLine($"Reason        : {e.Reason}");
+            Console.WriteLine($"Error code    : {e.ErrorCode}");
+            Console.WriteLine($"Error details : {e.ErrorDetails}");
+            Console.WriteLine("================================================");
+
+            if (e.Reason == CancellationReason.Error)
+            {
+                QueueLiveRestart();
+            }
+        };
+
+        await recognizer.StartContinuousRecognitionAsync();
+        if (!ReferenceEquals(_liveRecognizer, recognizer))
+        {
+            return;
+        }
+        _acceptingAudio = true;
+        Console.WriteLine(
+            "Live Azure Speech continuous recognition started.");
+    }
+
+    private void QueueLiveRestart()
+    {
+        if (!_wantLive)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _restartQueued, 1) == 1)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var delayMs = Math.Min(
+                    8000,
+                    500 * (1 << Math.Min(_restartFailures, 4)));
+                await Task.Delay(delayMs);
+                if (!_wantLive)
+                {
+                    return;
+                }
+
+                await _liveGate.WaitAsync();
+                try
+                {
+                    if (!_wantLive)
+                    {
+                        return;
+                    }
+
+                    Console.WriteLine(
+                        "[LIVE SPEECH] Restarting continuous recognition after timeout.");
+                    await TearDownLiveAsync();
+                    await CreateAndStartLiveAsync();
+                }
+                catch (Exception ex)
+                {
+                    _restartFailures++;
+                    _acceptingAudio = false;
+                    Console.WriteLine(
+                        $"[LIVE SPEECH] Restart failed: {ex.Message}");
+                    try
+                    {
+                        await TearDownLiveAsync();
+                    }
+                    catch
+                    {
+                        // Already logged in TearDownLiveAsync.
+                    }
+                }
+                finally
+                {
+                    _liveGate.Release();
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _restartQueued, 0);
+                if (_wantLive && !_acceptingAudio)
+                {
+                    QueueLiveRestart();
+                }
+            }
+        });
+    }
+
+    private async Task TearDownLiveAsync()
+    {
+        _acceptingAudio = false;
+        var recognizer = _liveRecognizer;
+        var pushStream = _livePushStream;
+        var audioConfig = _liveAudioConfig;
+        _liveRecognizer = null;
+        _livePushStream = null;
+        _liveAudioConfig = null;
+
+        if (recognizer != null)
+        {
+            try
+            {
+                await recognizer.StopContinuousRecognitionAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[LIVE SPEECH] Stop failed: {ex.Message}");
+            }
+
+            recognizer.Dispose();
+        }
+
+        try
+        {
+            pushStream?.Close();
+        }
+        catch
+        {
+            // Ignore close after a dead session.
+        }
+
+        pushStream?.Dispose();
+        audioConfig?.Dispose();
+    }
+
+    private static SpeechConfig CreateLiveRecognitionConfig(
+        string key,
+        string region)
+    {
+        var speechConfig = SpeechConfig.FromSubscription(key, region);
+        speechConfig.SpeechRecognitionLanguage = "en-US";
+        speechConfig.SetProperty(
+            PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+            LiveIdleTimeoutMs);
+        speechConfig.SetProperty(
+            PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+            LiveEndSilenceMs);
+        speechConfig.SetProperty(
+            PropertyId.Speech_SegmentationStrategy,
+            "Time");
+        speechConfig.SetProperty(
+            PropertyId.Speech_SegmentationSilenceTimeoutMs,
+            LiveEndSilenceMs);
+        speechConfig.SetProperty(
+            PropertyId.Speech_SegmentationMaximumTimeMs,
+            LiveMaxPhraseMs);
+        return speechConfig;
     }
 
     // ============================================================
@@ -440,7 +629,7 @@ public class SpeechRecognitionService
 
         speechConfig.SetProperty(
             PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
-            "1500");
+            LiveEndSilenceMs);
 
         return speechConfig;
     }
