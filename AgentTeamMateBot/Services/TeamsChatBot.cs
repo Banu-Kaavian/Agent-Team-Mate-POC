@@ -1,4 +1,5 @@
 using Microsoft.Bot.Builder;
+using Microsoft.Bot.Builder.Integration.AspNet.Core;
 using Microsoft.Bot.Schema;
 
 namespace AgentTeamMateBot.Services;
@@ -6,10 +7,19 @@ namespace AgentTeamMateBot.Services;
 public class TeamsChatBot : ActivityHandler
 {
     private readonly AppHostedMediaService _appHostedMediaService;
+    private readonly CloudAdapter _adapter;
+    private readonly string _botAppId;
 
-    public TeamsChatBot(AppHostedMediaService appHostedMediaService)
+    public TeamsChatBot(
+        AppHostedMediaService appHostedMediaService,
+        CloudAdapter adapter,
+        IConfiguration configuration)
     {
         _appHostedMediaService = appHostedMediaService;
+        _adapter = adapter;
+        _botAppId = configuration["MicrosoftAppId"]
+            ?? configuration["Bot:ClientId"]
+            ?? throw new InvalidOperationException("MicrosoftAppId / Bot:ClientId missing");
     }
 
     protected override async Task OnMembersAddedAsync(
@@ -40,6 +50,7 @@ public class TeamsChatBot : ActivityHandler
         Console.WriteLine(" TEAMS CHAT MESSAGE");
         Console.WriteLine("================================================");
         Console.WriteLine(text);
+        Console.WriteLine($"Conversation tenant: {turnContext.Activity.Conversation?.TenantId}");
 
         if (!MeetingJoinParser.TryParse(text, out var meetingId, out var passcode))
         {
@@ -62,24 +73,52 @@ public class TeamsChatBot : ActivityHandler
             MessageFactory.Text($"Joining meeting {meetingId}..."),
             cancellationToken);
 
-        try
-        {
-            var call = await _appHostedMediaService.JoinMeetingAsync(
-                meetingId,
-                passcode);
+        var conversation = turnContext.Activity.GetConversationReference();
 
-            await turnContext.SendActivityAsync(
-                MessageFactory.Text(
-                    $"I joined. Call ID {call.Id}. Say Agent Nova when you need me."),
-                cancellationToken);
-        }
-        catch (Exception ex)
+        // Join off the Bot Framework request so Graph Communications does not pick up
+        // the Teams chat tenant from this HTTP turn (tenant mismatch vs Call.TenantId).
+        _ = Task.Run(async () =>
         {
-            Console.WriteLine($"[TEAMS CHAT JOIN] {ex}");
-            await turnContext.SendActivityAsync(
-                MessageFactory.Text($"I could not join. {ex.Message}"),
-                cancellationToken);
-        }
+            try
+            {
+                var call = await _appHostedMediaService.JoinMeetingAsync(
+                    meetingId,
+                    passcode).ConfigureAwait(false);
+
+                await _adapter.ContinueConversationAsync(
+                    _botAppId,
+                    conversation,
+                    async (ctx, ct) =>
+                    {
+                        await ctx.SendActivityAsync(
+                            MessageFactory.Text(
+                                $"I joined. Call ID {call.Id}. Say Agent Nova when you need me."),
+                            ct);
+                    },
+                    CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TEAMS CHAT JOIN] {ex}");
+                try
+                {
+                    await _adapter.ContinueConversationAsync(
+                        _botAppId,
+                        conversation,
+                        async (ctx, ct) =>
+                        {
+                            await ctx.SendActivityAsync(
+                                MessageFactory.Text($"I could not join. {ex.Message}"),
+                                ct);
+                        },
+                        CancellationToken.None);
+                }
+                catch (Exception notifyEx)
+                {
+                    Console.WriteLine($"[TEAMS CHAT JOIN] notify failed: {notifyEx}");
+                }
+            }
+        });
     }
 
     private static string HelpText()

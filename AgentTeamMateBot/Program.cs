@@ -126,7 +126,7 @@ builder.Services.AddSingleton<MediaSessionService>();
 builder.Services.AddSingleton<AppHostedMediaService>();
 builder.Services.AddSingleton<MeetingMediaHandler>();
 builder.Services.AddSingleton<BotFrameworkAuthentication, ConfigurationBotFrameworkAuthentication>();
-builder.Services.AddSingleton<IBotFrameworkHttpAdapter>(sp =>
+builder.Services.AddSingleton<CloudAdapter>(sp =>
 {
     var auth = sp.GetRequiredService<BotFrameworkAuthentication>();
     var logger = sp.GetRequiredService<ILogger<CloudAdapter>>();
@@ -138,6 +138,8 @@ builder.Services.AddSingleton<IBotFrameworkHttpAdapter>(sp =>
     };
     return adapter;
 });
+builder.Services.AddSingleton<IBotFrameworkHttpAdapter>(sp =>
+    sp.GetRequiredService<CloudAdapter>());
 builder.Services.AddSingleton<IBot, TeamsChatBot>();
 
 var callbackUri =

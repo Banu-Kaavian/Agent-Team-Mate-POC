@@ -189,7 +189,17 @@ internal sealed class TenantAwareAuthenticationProvider : IRequestAuthentication
 
     public async Task AuthenticateOutboundRequestAsync(HttpRequestMessage request, string tenant)
     {
-        var tenantToUse = GraphAuthService.ResolveTenant(tenant, _homeTenantId);
+        // Always acquire the app token for the bot's home tenant.
+        // Graph Communications may pass the Teams chat conversation tenant from Bot Framework;
+        // that token tid then disagrees with Call.TenantId and Graph returns
+        // "Request authorization tenant mismatch".
+        var tenantToUse = _homeTenantId;
+        if (!string.IsNullOrWhiteSpace(tenant) &&
+            !string.Equals(tenant, _homeTenantId, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[AUTH] Ignoring Graph tenant '{tenant}', using home '{_homeTenantId}'");
+        }
+
         Console.WriteLine($"[AUTH] Outbound {request.Method} {request.RequestUri}");
         Console.WriteLine($"[AUTH] Outbound tenant arg='{tenant}' using='{tenantToUse}'");
 
