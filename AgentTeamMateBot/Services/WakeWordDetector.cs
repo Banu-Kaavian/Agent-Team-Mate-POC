@@ -6,10 +6,10 @@ public static class WakeWordDetector
 {
     private static readonly Regex AgentInvocationPattern =
         new(
-            @"\b(?:hey|hi|hello)\s+(?:there\s+)?(?:agent\s+)?(?:nova|nover|noble|noha|nava|noah|nower|nova's)\b|" +
-            @"\b(?:agent\s+)?(?:nova|nover|noble|noha|nava|noah|nower|nova's)\b|" +
+            @"\b(?:hey|hi|hello)\s+(?:there\s+)?(?:agent\s+)?(?:nova|nover|noble|noha|nola|nava|noah|nower|nova's)\b|" +
+            @"\b(?:agent\s+)?(?:nova|nover|noble|noha|nola|nava|noah|nower|nova's)\b|" +
             @"\bajanova\b|" +
-            @"\bage(?:nt)?\s+(?:nova|nover|noble|noha|nava|noah|nower|nova's)\b",
+            @"\bage(?:nt)?\s+(?:nova|nover|noble|noha|nola|nava|noah|nower|nova's)\b",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
@@ -34,6 +34,13 @@ public static class WakeWordDetector
             @"(?:left|let|leave)\s+(?:the\s+)?(?:meeting|call)|" +
             @"off\s+(?:the\s+)?(?:call|meeting)" +
             @")\b",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static readonly Regex StopSpeakingPattern =
+        new(
+            @"\b(?:stop(?:\s+talking)?|quiet|be\s+quiet|that's\s+enough|thats\s+enough|hold\s+on)\b",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
@@ -127,6 +134,17 @@ public static class WakeWordDetector
         return LeaveMeetingPattern.IsMatch(recognizedText);
     }
 
+    public static bool IsStopSpeakingRequest(string? recognizedText)
+    {
+        if (string.IsNullOrWhiteSpace(recognizedText) ||
+            !IsAgentInvocation(recognizedText))
+        {
+            return false;
+        }
+
+        return StopSpeakingPattern.IsMatch(recognizedText);
+    }
+
     public static bool IsSpokenRecapRequest(string? recognizedText)
     {
         if (string.IsNullOrWhiteSpace(recognizedText))
@@ -199,6 +217,7 @@ public static class WakeWordDetector
 
         if (IsLeaveMeetingRequest(recognizedText) ||
             IsSpokenRecapRequest(recognizedText) ||
+            IsStopSpeakingRequest(recognizedText) ||
             IsWorkflowSendRequest(recognizedText))
         {
             return true;

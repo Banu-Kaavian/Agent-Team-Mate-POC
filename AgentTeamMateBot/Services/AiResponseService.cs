@@ -93,7 +93,7 @@ public class AiResponseService
         var payload = new
         {
             messages,
-            max_completion_tokens = 400,
+            max_completion_tokens = 220,
             reasoning_effort = "minimal"
         };
 
@@ -185,7 +185,7 @@ public class AiResponseService
             Console.WriteLine(answer);
             Console.WriteLine("================================================");
 
-            return answer;
+            return ClipSpoken(answer);
         }
 
         BotLog.Info(
@@ -343,13 +343,10 @@ public class AiResponseService
             $"{endpoint.TrimEnd('/')}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
 
         var system =
-            "You are Agent Nova recapping this Teams meeting out loud. " +
-            "Give a simple spoken recap only. Do not offer to send a workflow. " +
-            "Focus on the technical points: products, versions, APIs, BAPIs, OData, RFC, tools, " +
-            "objects, and decisions that were actually discussed. " +
-            "Keep Agent Nova's technical recommendations. " +
-            "Use four to eight short sentences. No markdown, bullets, or URLs. " +
-            "Do not invent facts.";
+            "You are Agent Nova giving a brief spoken summary of this Teams meeting. " +
+            "Speak only the key points that were actually discussed: decisions, objects, APIs, and owners. " +
+            "Use two or three short sentences. Never more than four. " +
+            "No catalogs, no field lists, no URLs, no markdown, no workflow. Do not invent facts.";
 
         var payload = new
         {
@@ -362,7 +359,7 @@ public class AiResponseService
                     content = "Recap this meeting for the people on the call:\n\n" + liveTranscript
                 }
             },
-            max_completion_tokens = 700,
+            max_completion_tokens = 220,
             reasoning_effort = "minimal"
         };
 
@@ -400,7 +397,7 @@ public class AiResponseService
                 var text = ExtractMessageText(choice);
                 if (!string.IsNullOrWhiteSpace(text))
                 {
-                    return text.Trim();
+                    return ClipSpoken(text.Trim());
                 }
             }
         }
@@ -621,27 +618,19 @@ public class AiResponseService
         var now = DateTime.Now;
 
         builder.Append(
-            "You are Agent Nova, a teammate in this Microsoft Teams meeting with SAP technical and functional experience. ");
+            "You are Agent Nova, a teammate in this Microsoft Teams meeting with SAP experience. ");
         builder.Append(
-            "Talk like a colleague on the call, not like a project manager or a help desk script. ");
+            "Speak briefly and clearly. Two short sentences. Never more than three. ");
         builder.Append(
-            "Give a direct answer in two or three short spoken sentences. Never more than four sentences. ");
+            "Name at most one object or API. Do not list fields, entities, catalogs, or options. ");
         builder.Append(
-            "Then ask one simple teammate question when it helps, such as what they already tried, which object, " +
-            "which system, volume, timeline, or whether they want you to go deeper. " +
-            "Ask only one question. Do not interview them. Skip the question if the transcript already answered it. ");
-        builder.Append(
-            "Do not say next step, next steps, or give a plan unless someone asks what to do next or asks for a plan. ");
-        builder.Append(
-            "Do not list categories, do not give long requirement catalogs, and do not explain every option. ");
+            "Do not explain background. Do not say next steps unless they ask. Do not ask a follow-up question. ");
         builder.Append(
             "No markdown, bullets, numbers, URLs, or symbols. Start with the answer. Do not invent meeting facts. ");
         builder.Append(
-            "If they ask what was said earlier, what we discussed before, previous points, or who said what, " +
-            "answer from the meeting transcript below. Restate those earlier points in plain speech. " +
-            "If it is not in the transcript, say you do not have that yet. ");
+            "If they ask what was said earlier, give two short points from the transcript only. ");
         builder.Append(
-            "If they only asked for a summary, recap only. Do not mention the workflow. ");
+            "If they asked for a summary, give only key points in two or three short sentences. Do not mention the workflow. ");
         builder.Append(
             $"The current local date and time is {now:dddd, MMMM d, yyyy} at {now:h:mm tt}.");
 
@@ -665,6 +654,37 @@ public class AiResponseService
         builder.Append(currentQuestion);
 
         return builder.ToString();
+    }
+
+    public static string ClipSpoken(string? text, int maxChars = 380)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = text.Trim();
+        var parts = trimmed.Split(
+            new[] { ". ", "? ", "! " },
+            StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length > 3)
+        {
+            trimmed = string.Join(". ", parts.Take(3)).TrimEnd('.', '?', '!') + ".";
+        }
+
+        if (trimmed.Length <= maxChars)
+        {
+            return trimmed;
+        }
+
+        var cut = trimmed[..maxChars];
+        var lastStop = cut.LastIndexOfAny(new[] { '.', '?', '!' });
+        if (lastStop >= 80)
+        {
+            return cut[..(lastStop + 1)].Trim();
+        }
+
+        return cut.Trim() + ".";
     }
 
     private static void LogConversationMemory(

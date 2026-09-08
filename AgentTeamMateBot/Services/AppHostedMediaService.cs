@@ -33,6 +33,8 @@ public class AppHostedMediaService
     private readonly ConcurrentDictionary<Guid, AudioSocketBinding> _audioBindings = new();
     private readonly ConcurrentDictionary<string, byte> _welcomePlayed = new();
     private readonly object _initLock = new();
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private CancellationTokenSource _ttsCts = new();
 
     // Track the active call ID for the continuous recognizer callback
     private string? _activeCallId;
@@ -559,7 +561,8 @@ public class AppHostedMediaService
     private void OnLiveSpeechRecognized(string recognizedText)
     {
         var callId = _activeCallId;
-        if (string.IsNullOrWhiteSpace(callId))
+        if (string.IsNullOrWhiteSpace(callId) ||
+            !_calls.ContainsKey(callId))
         {
             return;
         }
@@ -569,6 +572,16 @@ public class AppHostedMediaService
 
         if (!WakeWordDetector.IsAgentInvocation(recognizedText))
         {
+            return;
+        }
+
+        CancelSpeaking();
+
+        if (WakeWordDetector.IsStopSpeakingRequest(recognizedText) &&
+            !WakeWordDetector.IsLeaveMeetingRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            _ = Task.Run(async () => await SpeakAndRecordAsync(callId, "Okay."));
             return;
         }
 
@@ -660,6 +673,13 @@ public class AppHostedMediaService
                 {
                     BotLog.Info("Error: No AI response text.");
                     Console.WriteLine("[APP-HOSTED AI] No response received.");
+                    return;
+                }
+
+                if (!_calls.ContainsKey(callId))
+                {
+                    Console.WriteLine(
+                        $"[APP-HOSTED] Call {callId} already ended. Skipping TTS.");
                     return;
                 }
 
@@ -899,88 +919,126 @@ public class AppHostedMediaService
     // free the unmanaged memory here — AudioSendBuffer.Dispose does.
     // ============================================================
 
+    private void CancelSpeaking()
+    {
+        try
+        {
+            _ttsCts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        var next = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _ttsCts, next);
+        previous.Dispose();
+    }
+
     private Task SendPcmToAudioSocketAsync(string callId, byte[] pcmData)
     {
-        return Task.Run(() => SendPcmToAudioSocket(callId, pcmData));
+        var token = _ttsCts.Token;
+        return Task.Run(() => SendPcmToAudioSocket(callId, pcmData, token));
     }
 
     private void SendPcmToAudioSocket(
-        string callId, byte[] pcmData)
+        string callId, byte[] pcmData, CancellationToken cancellationToken)
     {
-        if (!_mediaSessions.TryGetValue(callId, out var mediaSession))
+        _sendGate.Wait(cancellationToken);
+        try
         {
-            Console.WriteLine(
-                $"[APP-HOSTED SEND] No media session for call {callId}.");
-            return;
-        }
-
-        var audioSocket = mediaSession.AudioSocket;
-        if (audioSocket == null)
-        {
-            Console.WriteLine(
-                "[APP-HOSTED SEND] AudioSocket is null.");
-            return;
-        }
-
-        // PCM 16kHz 16-bit mono: 20ms frames = 640 bytes
-        const int frameSize = 640;
-        const long frameDurationTicks = 20 * 10000;
-        var timestamp = DateTime.UtcNow.Ticks;
-        var totalFrames = pcmData.Length / frameSize;
-
-        Console.WriteLine();
-        Console.WriteLine("================================================");
-        Console.WriteLine(" [APP-HOSTED] SENDING AUDIO TO TEAMS");
-        Console.WriteLine("================================================");
-        Console.WriteLine($"Call ID      : {callId}");
-        Console.WriteLine($"PCM bytes    : {pcmData.Length}");
-        Console.WriteLine($"Frames (20ms): {totalFrames}");
-        Console.WriteLine("================================================");
-
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-
-        for (var i = 0; i < totalFrames; i++)
-        {
-            var unmanagedBuffer = Marshal.AllocHGlobal(frameSize);
-            try
+            if (cancellationToken.IsCancellationRequested ||
+                !_mediaSessions.TryGetValue(callId, out var mediaSession))
             {
-                Marshal.Copy(pcmData, i * frameSize, unmanagedBuffer, frameSize);
-
-                // Ownership of unmanagedBuffer transfers to AudioSendBuffer.
-                // Media platform calls Dispose later and frees the memory.
-                var buffer = new AudioSendBuffer(
-                    unmanagedBuffer,
-                    frameSize,
-                    AudioFormat.Pcm16K,
-                    timestamp);
-
-                unmanagedBuffer = IntPtr.Zero;
-                audioSocket.Send(buffer);
-            }
-            catch (Exception ex)
-            {
-                if (unmanagedBuffer != IntPtr.Zero)
+                if (!_mediaSessions.ContainsKey(callId))
                 {
-                    Marshal.FreeHGlobal(unmanagedBuffer);
+                    Console.WriteLine(
+                        $"[APP-HOSTED SEND] No media session for call {callId}.");
                 }
 
-                Console.WriteLine(
-                    $"[APP-HOSTED SEND] Frame {i} send error: {ex.Message}");
-                break;
+                return;
             }
 
-            timestamp += frameDurationTicks;
-
-            var targetMs = (i + 1) * 20;
-            var delayMs = targetMs - (int)stopwatch.ElapsedMilliseconds;
-            if (delayMs > 0)
+            var audioSocket = mediaSession.AudioSocket;
+            if (audioSocket == null)
             {
-                Thread.Sleep(delayMs);
+                Console.WriteLine(
+                    "[APP-HOSTED SEND] AudioSocket is null.");
+                return;
+            }
+
+            const int frameSize = 640;
+            const long frameDurationTicks = 20 * 10000;
+            var timestamp = DateTime.UtcNow.Ticks;
+            var totalFrames = pcmData.Length / frameSize;
+
+            Console.WriteLine();
+            Console.WriteLine("================================================");
+            Console.WriteLine(" [APP-HOSTED] SENDING AUDIO TO TEAMS");
+            Console.WriteLine("================================================");
+            Console.WriteLine($"Call ID      : {callId}");
+            Console.WriteLine($"PCM bytes    : {pcmData.Length}");
+            Console.WriteLine($"Frames (20ms): {totalFrames}");
+            Console.WriteLine("================================================");
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            for (var i = 0; i < totalFrames; i++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    Console.WriteLine(
+                        $"[APP-HOSTED SEND] Stopped TTS early for call {callId}.");
+                    break;
+                }
+
+                var unmanagedBuffer = Marshal.AllocHGlobal(frameSize);
+                try
+                {
+                    Marshal.Copy(pcmData, i * frameSize, unmanagedBuffer, frameSize);
+                    var buffer = new AudioSendBuffer(
+                        unmanagedBuffer,
+                        frameSize,
+                        AudioFormat.Pcm16K,
+                        timestamp);
+                    unmanagedBuffer = IntPtr.Zero;
+                    audioSocket.Send(buffer);
+                }
+                catch (Exception ex)
+                {
+                    if (unmanagedBuffer != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(unmanagedBuffer);
+                    }
+
+                    Console.WriteLine(
+                        $"[APP-HOSTED SEND] Frame {i} send error: {ex.Message}");
+                    break;
+                }
+
+                timestamp += frameDurationTicks;
+                var targetMs = (i + 1) * 20;
+                var delayMs = targetMs - (int)stopwatch.ElapsedMilliseconds;
+                if (delayMs > 0)
+                {
+                    cancellationToken.WaitHandle.WaitOne(delayMs);
+                }
+            }
+
+            Console.WriteLine(
+                $"[APP-HOSTED SEND] Sent audio for call {callId}.");
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine(
+                $"[APP-HOSTED SEND] TTS canceled for call {callId}.");
+        }
+        finally
+        {
+            if (_sendGate.CurrentCount == 0)
+            {
+                _sendGate.Release();
             }
         }
-
-        Console.WriteLine(
-            $"[APP-HOSTED SEND] Sent audio for call {callId}.");
     }
 
     private IPAddress ResolvePublicIp(string serviceFqdn)
