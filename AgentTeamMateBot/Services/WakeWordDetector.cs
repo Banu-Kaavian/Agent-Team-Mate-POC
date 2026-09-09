@@ -48,10 +48,16 @@ public static class WakeWordDetector
     private static readonly Regex SkipWorkflowPattern =
         new(
             @"\b(?:do\s+not|don't|dont|never|skip|without|not\s+to|no\s+need\s+to)\s+" +
-            @"(?:call(?:ing)?\s+)?(?:the\s+)?(?:workflow|logic\s*app|export)\b|" +
+            @"(?:to\s+)?" +
+            @"(?:call(?:ing)?|trigger(?:ing)?|invoke(?:ing)?|run(?:ning)?|start(?:ing)?|send(?:ing)?|export(?:ing)?|post(?:ing)?|fire)\s+" +
+            @"(?:to\s+)?(?:the\s+)?(?:workflow|work\s*flow|logic\s*app|export)\b|" +
+            @"\b(?:do\s+not|don't|dont|never)\s+trigger(?:ing)?\b|" +
+            @"\bnot\s+to\s+trigger(?:ing)?\b|" +
+            @"\bno\s+(?:need\s+to\s+)?trigger(?:ing)?\b|" +
             @"\b(?:don't|do\s+not|dont)\s+(?:send|export|post)\b|" +
             @"\bno\s+workflow\b|" +
-            @"\bskip\s+(?:the\s+)?(?:workflow|export)\b",
+            @"\bskip\s+(?:the\s+)?(?:workflow|work\s*flow|export)\b|" +
+            @"\bleave\s+without\s+(?:the\s+)?(?:workflow|trigger(?:ing)?)\b",
             RegexOptions.IgnoreCase |
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
@@ -162,6 +168,11 @@ public static class WakeWordDetector
             return false;
         }
 
+        if (IsSkipWorkflowRequest(recognizedText))
+        {
+            return false;
+        }
+
         return WorkflowSendPattern.IsMatch(recognizedText);
     }
 
@@ -218,6 +229,7 @@ public static class WakeWordDetector
         if (IsLeaveMeetingRequest(recognizedText) ||
             IsSpokenRecapRequest(recognizedText) ||
             IsStopSpeakingRequest(recognizedText) ||
+            IsSkipWorkflowRequest(recognizedText) ||
             IsWorkflowSendRequest(recognizedText))
         {
             return true;

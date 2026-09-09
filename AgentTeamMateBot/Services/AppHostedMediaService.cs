@@ -614,6 +614,17 @@ public class AppHostedMediaService
             return;
         }
 
+        if (WakeWordDetector.IsSkipWorkflowRequest(recognizedText))
+        {
+            BotLog.Info($"User: {recognizedText}");
+            BotLog.Info("Workflow export disabled for this call. Still in meeting.");
+            _ = Task.Run(async () =>
+                await SpeakAndRecordAsync(
+                    callId,
+                    "Okay. I will not send the workflow. Ask me to leave when you want me to go."));
+            return;
+        }
+
         if (WakeWordDetector.IsWorkflowSendRequest(recognizedText))
         {
             BotLog.Info($"User: {recognizedText}");
@@ -751,7 +762,10 @@ public class AppHostedMediaService
             if (skipWorkflow)
             {
                 BotLog.Info("Leaving meeting without workflow export.");
-                await LeaveMeetingAsync(callId, sayGoodbye: true);
+                await SpeakAndRecordAsync(
+                    callId,
+                    "Okay. I am leaving without sending the workflow.");
+                await LeaveMeetingAsync(callId, sayGoodbye: false);
                 return;
             }
 
