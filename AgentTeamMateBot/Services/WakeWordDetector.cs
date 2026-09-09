@@ -100,6 +100,25 @@ public static class WakeWordDetector
             RegexOptions.CultureInvariant |
             RegexOptions.Compiled);
 
+    // Intro / bot-test talk is not a question (STT often garbles "Hey" / names).
+    private static readonly Regex CheckInOrIntroPattern =
+        new(
+            @"\b(?:just\s+|currently\s+)?test(?:ing)?(?:\s+(?:the\s+)?bot)?\b|" +
+            @"\b(?:can\s+you\s+hear\s+me|are\s+you\s+(?:there|listening)|checking\s+in)\b|" +
+            @"\bmy\s+name\s+is\b|" +
+            @"\bi(?:'m| am)\s+\w+(?:\s+\w+){0,3}\s+(?:and\s+)?i(?:'m| am)\s+currently\s+test",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
+    private static readonly Regex RealQuestionPattern =
+        new(
+            @"\?|" +
+            @"\b(?:what|why|how|when|where|who|explain|tell\s+me|summarize|summarise|recap)\b",
+            RegexOptions.IgnoreCase |
+            RegexOptions.CultureInvariant |
+            RegexOptions.Compiled);
+
     // Phrases that remain after stripping "Agent Nova" but are not a real ask.
     private static readonly Regex FillerOnlyPattern =
         new(
@@ -264,6 +283,12 @@ public static class WakeWordDetector
             return false;
         }
 
+        if (IsCheckInOrIntro(normalized) &&
+            !RealQuestionPattern.IsMatch(normalized))
+        {
+            return false;
+        }
+
         // Strip filler prefixes like "Yeah, OK, thank you, ..." then re-check.
         var withoutLeadingFiller = Regex.Replace(
             normalized,
@@ -280,7 +305,23 @@ public static class WakeWordDetector
             return false;
         }
 
+        if (IsCheckInOrIntro(withoutLeadingFiller) &&
+            !RealQuestionPattern.IsMatch(withoutLeadingFiller))
+        {
+            return false;
+        }
+
         return true;
+    }
+
+    public static bool IsCheckInOrIntro(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        return CheckInOrIntroPattern.IsMatch(text);
     }
 
     public static string RemoveActivationPhrase(

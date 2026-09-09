@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace AgentTeamMateBot.Services;
 
@@ -185,7 +186,7 @@ public class AiResponseService
             Console.WriteLine(answer);
             Console.WriteLine("================================================");
 
-            return ClipSpoken(answer);
+            return ClipSpoken(SanitizeSpokenEcho(answer, userMessage));
         }
 
         BotLog.Info(
@@ -632,6 +633,11 @@ public class AiResponseService
         builder.Append(
             "If they asked for a summary, give only key points in two or three short sentences. Do not mention the workflow. ");
         builder.Append(
+            "Never repeat, quote, or read back the user's words. Never say I heard. " +
+            "If they are only greeting, introducing themselves, or testing the bot, say you are here and stop. ");
+        builder.Append(
+            "Answer the question. Do not narrate the transcript. ");
+        builder.Append(
             $"The current local date and time is {now:dddd, MMMM d, yyyy} at {now:h:mm tt}.");
 
         builder.AppendLine();
@@ -654,6 +660,31 @@ public class AiResponseService
         builder.Append(currentQuestion);
 
         return builder.ToString();
+    }
+
+    private static string SanitizeSpokenEcho(string answer, string userMessage)
+    {
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            return answer;
+        }
+
+        if (Regex.IsMatch(
+                answer,
+                @"\bI heard\b",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            return "I'm here. What are we looking at?";
+        }
+
+        var quoted = userMessage.Trim().Trim('"', '\'');
+        if (quoted.Length >= 12 &&
+            answer.Contains(quoted, StringComparison.OrdinalIgnoreCase))
+        {
+            return "I'm here. What are we looking at?";
+        }
+
+        return answer;
     }
 
     public static string ClipSpoken(string? text, int maxChars = 380)
