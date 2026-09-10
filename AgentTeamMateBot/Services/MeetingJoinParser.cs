@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text.RegularExpressions;
 
 namespace AgentTeamMateBot.Services;
@@ -7,7 +6,7 @@ public static class MeetingJoinParser
 {
     private static readonly HashSet<string> IgnoredTokens = new(StringComparer.OrdinalIgnoreCase)
     {
-        "join", "meeting", "id", "meetingid", "passcode", "password", "pin", "or", "and", "the"
+        "join", "meeting", "id", "meetingid", "passcode", "password", "or", "and", "the"
     };
 
     public static bool TryParse(string? text, out string meetingId, out string? passcode)
@@ -22,12 +21,12 @@ public static class MeetingJoinParser
 
         var cleaned = Normalize(text);
 
-        TryFromTeamsMeetUrl(cleaned, out var urlId, out var urlPasscode);
+        TryFromTeamsMeetUrl(cleaned, out var urlId, out _);
         TryFromLabels(cleaned, out var labeledId, out var labeledPasscode);
         TryFromTokens(cleaned, out var tokenId, out var tokenPasscode);
 
         meetingId = FirstId(urlId, labeledId, tokenId);
-        passcode = FirstPasscode(labeledPasscode, urlPasscode, tokenPasscode);
+        passcode = FirstPasscode(labeledPasscode, tokenPasscode);
 
         return meetingId.Length >= 10;
     }
@@ -53,7 +52,7 @@ public static class MeetingJoinParser
 
         var meet = Regex.Match(
             text,
-            @"https?://(?:www\.)?teams\.microsoft\.com/meet/(\d{10,20})(?:\?([^\s<>""']*))?",
+            @"https?://(?:www\.)?teams\.microsoft\.com/meet/(\d{10,20})\?p=[^\s<>""']+",
             RegexOptions.IgnoreCase);
         if (!meet.Success)
         {
@@ -61,12 +60,6 @@ public static class MeetingJoinParser
         }
 
         meetingId = meet.Groups[1].Value;
-        var query = meet.Groups[2].Success ? meet.Groups[2].Value : string.Empty;
-        var pass = Regex.Match(query, @"(?:^|&)p=([^&]+)", RegexOptions.IgnoreCase);
-        if (pass.Success)
-        {
-            passcode = WebUtility.UrlDecode(pass.Groups[1].Value);
-        }
     }
 
     private static void TryFromLabels(
@@ -79,7 +72,7 @@ public static class MeetingJoinParser
 
         var idMatch = Regex.Match(
             text,
-            @"(?:meeting\s*id|meetingid)\s*[:=]?\s*([\d\s]{10,40})",
+            @"Meeting\s*ID\s*:\s*([\d\s]{10,40})",
             RegexOptions.IgnoreCase);
         if (idMatch.Success)
         {
@@ -88,7 +81,7 @@ public static class MeetingJoinParser
 
         var passMatch = Regex.Match(
             text,
-            @"\b(?:passcode|password|pin)\b\s*[:=]?\s*([A-Za-z0-9]{4,64})",
+            @"Passcode\s*:\s*([A-Za-z0-9]{8})\b",
             RegexOptions.IgnoreCase);
         if (passMatch.Success)
         {
@@ -124,7 +117,7 @@ public static class MeetingJoinParser
             }
 
             if (token.Any(char.IsLetter) &&
-                Regex.IsMatch(token, @"^[A-Za-z0-9]{4,64}$"))
+                Regex.IsMatch(token, @"^[A-Za-z0-9]{8}$"))
             {
                 trailingPasscode = token;
             }
