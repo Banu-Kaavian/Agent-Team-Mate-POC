@@ -88,7 +88,7 @@ public static class MeetingJoinParser
 
         var passMatch = Regex.Match(
             text,
-            @"(?:passcode|password|pin)\s*[:=]?\s*([A-Za-z0-9]{4,64})",
+            @"\b(?:passcode|password|pin)\b\s*[:=]?\s*([A-Za-z0-9]{4,64})",
             RegexOptions.IgnoreCase);
         if (passMatch.Success)
         {
