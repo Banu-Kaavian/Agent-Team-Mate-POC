@@ -49,6 +49,8 @@ public static class WakeWordDetector
         new(
             @"\b(?:do\s+not|don't|dont|never|skip|without|not\s+to|no\s+need\s+to)\s+" +
             @"(?:call(?:ing)?\s+)?(?:the\s+)?(?:workflow|logic\s*app|export)\b|" +
+            @"\b(?:do\s+not|don't|dont|never)\s+trigger(?:ing)?(?:\s+(?:the\s+)?(?:workflow|work\s*flow))?\b|" +
+            @"\bwithout\s+trigger(?:ing)?(?:\s+(?:the\s+)?(?:workflow|work\s*flow))?\b|" +
             @"\b(?:don't|do\s+not|dont)\s+(?:send|export|post)\b|" +
             @"\bno\s+workflow\b|" +
             @"\bskip\s+(?:the\s+)?(?:workflow|export)\b",
