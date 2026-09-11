@@ -74,6 +74,8 @@ public class AppHostedMediaService
 
     public string? InitError => _initError;
 
+    public string? ActiveCallId => _activeCallId;
+
     public bool IsAppHostedCall(string? callId)
     {
         return !string.IsNullOrWhiteSpace(callId) &&
@@ -451,6 +453,7 @@ public class AppHostedMediaService
         foreach (var call in args.RemovedResources)
         {
             Console.WriteLine($"[APP-HOSTED CALL] Removed {call.Id}");
+            ForgetCallMemory(call.Id);
             _welcomePlayed.TryRemove(call.Id, out _);
             _calls.TryRemove(call.Id, out _);
             if (_mediaSessions.TryRemove(call.Id, out var session))
@@ -470,6 +473,25 @@ public class AppHostedMediaService
     private void OnCallResourceUpdated(ICall sender, ResourceEventArgs<Call> args)
     {
         LogCallState(sender);
+        if (sender.Resource?.State == CallState.Terminated)
+        {
+            ForgetCallMemory(sender.Id);
+        }
+    }
+
+    private void ForgetCallMemory(string callId)
+    {
+        if (string.IsNullOrWhiteSpace(callId))
+        {
+            return;
+        }
+
+        _aiResponseService.ClearConversation(callId);
+        _meetingContextService.Clear(callId);
+        if (string.Equals(_activeCallId, callId, StringComparison.OrdinalIgnoreCase))
+        {
+            _activeCallId = null;
+        }
     }
 
     private static void LogCallState(ICall call)
@@ -797,6 +819,7 @@ public class AppHostedMediaService
 
             await call.DeleteAsync();
             BotLog.Info("Left the meeting.");
+            ForgetCallMemory(callId);
         }
         catch (Exception ex)
         {

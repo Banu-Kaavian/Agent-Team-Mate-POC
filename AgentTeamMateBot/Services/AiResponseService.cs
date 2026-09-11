@@ -628,6 +628,11 @@ public class AiResponseService
         builder.Append(
             "No markdown, bullets, numbers, URLs, or symbols. Start with the answer. Do not invent meeting facts. ");
         builder.Append(
+            "You cannot open Teams file attachments. If Chat attachment: filename appears, you may use the file name only. " +
+            "Never invent invoice totals or document contents. For small talk, do not invent work you did. " +
+            "Lines starting with Chat (Name): are Teams chat from this meeting. " +
+            "If they ask in the call about something posted in chat, answer from those Chat lines. ");
+        builder.Append(
             "If they ask what was said earlier, give two short points from the transcript only. ");
         builder.Append(
             "If they asked for a summary, give only key points in two or three short sentences. Do not mention the workflow. ");

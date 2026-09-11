@@ -197,6 +197,45 @@ public class MeetingContextService
         }
     }
 
+    public void AppendChatMessage(string conversationId, string? callId, string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(conversationId))
+        {
+            AppendLiveTranscript(conversationId, line);
+        }
+
+        if (!string.IsNullOrWhiteSpace(callId) &&
+            !string.Equals(callId, conversationId, StringComparison.Ordinal))
+        {
+            AppendLiveTranscript(callId, line);
+        }
+    }
+
+    public void MergeChatIntoCall(string conversationId, string callId)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId) ||
+            string.IsNullOrWhiteSpace(callId) ||
+            string.Equals(conversationId, callId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var priorChat = GetLiveTranscript(conversationId);
+        if (string.IsNullOrWhiteSpace(priorChat))
+        {
+            return;
+        }
+
+        AppendLiveTranscript(callId, priorChat);
+        Console.WriteLine(
+            $"[CHAT CONTEXT] Merged 1:1 chat into call {callId}.");
+    }
+
     public bool ShouldSkipWorkflowExport(string callId)
     {
         if (string.IsNullOrWhiteSpace(callId) ||

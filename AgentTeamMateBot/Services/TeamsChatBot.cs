@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Bot.Builder;
 using Microsoft.Bot.Builder.Integration.AspNet.Core;
 using Microsoft.Bot.Schema;
@@ -6,16 +7,25 @@ namespace AgentTeamMateBot.Services;
 
 public class TeamsChatBot : ActivityHandler
 {
+    private static readonly Regex MentionMarkupPattern =
+        new(@"</?at[^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private readonly AppHostedMediaService _appHostedMediaService;
+    private readonly MeetingContextService _meetingContextService;
+    private readonly AiResponseService _aiResponseService;
     private readonly CloudAdapter _adapter;
     private readonly string _botAppId;
 
     public TeamsChatBot(
         AppHostedMediaService appHostedMediaService,
+        MeetingContextService meetingContextService,
+        AiResponseService aiResponseService,
         CloudAdapter adapter,
         IConfiguration configuration)
     {
         _appHostedMediaService = appHostedMediaService;
+        _meetingContextService = meetingContextService;
+        _aiResponseService = aiResponseService;
         _adapter = adapter;
         _botAppId = configuration["MicrosoftAppId"]
             ?? configuration["Bot:ClientId"]
@@ -44,7 +54,7 @@ public class TeamsChatBot : ActivityHandler
         ITurnContext<IMessageActivity> turnContext,
         CancellationToken cancellationToken)
     {
-        var text = GetJoinText(turnContext.Activity);
+        var text = GetMessageText(turnContext.Activity);
         Console.WriteLine();
         Console.WriteLine("================================================");
         Console.WriteLine(" TEAMS CHAT MESSAGE");
@@ -52,14 +62,25 @@ public class TeamsChatBot : ActivityHandler
         Console.WriteLine(text);
         Console.WriteLine($"Conversation tenant: {turnContext.Activity.Conversation?.TenantId}");
 
-        if (!MeetingJoinParser.TryParse(text, out var meetingId, out var passcode))
+        if (MeetingJoinParser.TryParse(text, out var meetingId, out var passcode))
         {
-            await turnContext.SendActivityAsync(
-                MessageFactory.Text(HelpText()),
+            await JoinFromChatAsync(
+                turnContext,
+                meetingId,
+                passcode,
                 cancellationToken);
             return;
         }
 
+        await AnswerFromChatAsync(turnContext, text, cancellationToken);
+    }
+
+    private async Task JoinFromChatAsync(
+        ITurnContext<IMessageActivity> turnContext,
+        string meetingId,
+        string? passcode,
+        CancellationToken cancellationToken)
+    {
         Console.WriteLine($"Parsed meetingId={meetingId} passcode={passcode}");
 
         if (!_appHostedMediaService.IsInitialized)
@@ -77,8 +98,6 @@ public class TeamsChatBot : ActivityHandler
 
         var conversation = turnContext.Activity.GetConversationReference();
 
-        // Join off the Bot Framework request so Graph Communications does not pick up
-        // the Teams chat tenant from this HTTP turn (tenant mismatch vs Call.TenantId).
         _ = Task.Run(async () =>
         {
             try
@@ -87,6 +106,10 @@ public class TeamsChatBot : ActivityHandler
                     meetingId,
                     passcode).ConfigureAwait(false);
 
+                _meetingContextService.MergeChatIntoCall(
+                    conversation.Conversation?.Id ?? string.Empty,
+                    call.Id);
+
                 await _adapter.ContinueConversationAsync(
                     _botAppId,
                     conversation,
@@ -94,7 +117,7 @@ public class TeamsChatBot : ActivityHandler
                     {
                         await ctx.SendActivityAsync(
                             MessageFactory.Text(
-                                $"I joined. Call ID {call.Id}. Say Agent Nova when you need me."),
+                                $"I joined. Call ID {call.Id}. Ask me in chat or say Agent Nova in the meeting."),
                             ct);
                     },
                     CancellationToken.None);
@@ -123,7 +146,127 @@ public class TeamsChatBot : ActivityHandler
         });
     }
 
-    private static string GetJoinText(IMessageActivity activity)
+    private async Task AnswerFromChatAsync(
+        ITurnContext<IMessageActivity> turnContext,
+        string rawText,
+        CancellationToken cancellationToken)
+    {
+        var speaker = string.IsNullOrWhiteSpace(turnContext.Activity.From?.Name)
+            ? "Someone"
+            : turnContext.Activity.From.Name.Trim();
+        var spoken = StripMentions(rawText);
+        var conversationId = turnContext.Activity.Conversation?.Id;
+        var callId = _appHostedMediaService.ActiveCallId;
+
+        var chatLine = $"Chat ({speaker}): {spoken}";
+        foreach (var name in GetAttachmentNames(turnContext.Activity))
+        {
+            chatLine += $"{Environment.NewLine}Chat attachment: {name}";
+        }
+
+        _meetingContextService.AppendChatMessage(conversationId ?? "chat", callId, chatLine);
+        Console.WriteLine($"[CHAT CONTEXT] {chatLine}");
+
+        var contextId = callId ?? conversationId ?? "chat";
+
+        if (!IsDirectedAtNova(turnContext))
+        {
+            return;
+        }
+
+        var question = spoken;
+        if (WakeWordDetector.IsAgentInvocation(question))
+        {
+            question = WakeWordDetector.RemoveActivationPhrase(question);
+        }
+
+        if (string.IsNullOrWhiteSpace(question) ||
+            !WakeWordDetector.IsActionableRequest(
+                "Agent Nova " + question))
+        {
+            await turnContext.SendActivityAsync(
+                MessageFactory.Text("I'm here. Ask about the meeting or the chat."),
+                cancellationToken);
+            return;
+        }
+
+        Console.WriteLine("[CHAT] Asking Nova...");
+        try
+        {
+            var answer = await _aiResponseService.GetResponseAsync(
+                contextId,
+                question);
+            if (string.IsNullOrWhiteSpace(answer))
+            {
+                answer = "I could not answer that just now. Please try again.";
+            }
+
+            await turnContext.SendActivityAsync(
+                MessageFactory.Text(answer),
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[CHAT] Answer failed: {ex.Message}");
+            await turnContext.SendActivityAsync(
+                MessageFactory.Text("I hit an error answering that. Please try again."),
+                cancellationToken);
+        }
+    }
+
+    private static bool IsDirectedAtNova(ITurnContext<IMessageActivity> turnContext)
+    {
+        var conversation = turnContext.Activity.Conversation;
+        if (conversation != null &&
+            (conversation.IsGroup != true ||
+             string.Equals(
+                 conversation.ConversationType,
+                 "personal",
+                 StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        if (turnContext.Activity.Entities != null &&
+            turnContext.Activity.Entities.Any(entity =>
+                string.Equals(entity.Type, "mention", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        return WakeWordDetector.IsAgentInvocation(turnContext.Activity.Text);
+    }
+
+    private static string StripMentions(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var stripped = MentionMarkupPattern.Replace(text, " ");
+        stripped = Regex.Replace(stripped, @"<[^>]+>", " ");
+        stripped = Regex.Replace(stripped, @"\s+", " ").Trim();
+        return stripped;
+    }
+
+    private static IEnumerable<string> GetAttachmentNames(IMessageActivity activity)
+    {
+        if (activity.Attachments == null)
+        {
+            yield break;
+        }
+
+        foreach (var attachment in activity.Attachments)
+        {
+            if (!string.IsNullOrWhiteSpace(attachment.Name))
+            {
+                yield return attachment.Name.Trim();
+            }
+        }
+    }
+
+    private static string GetMessageText(IMessageActivity activity)
     {
         var parts = new List<string>();
 
@@ -164,10 +307,11 @@ public class TeamsChatBot : ActivityHandler
     private static string HelpText()
     {
         return
-            "Paste the Teams join invite, for example:\n" +
+            "Paste a Teams join invite to add me to the meeting.\n" +
+            "After I join, ask in this chat or say Agent Nova in the call.\n" +
+            "Example invite:\n" +
             "Join: https://teams.microsoft.com/meet/251659872407654?p=pD0ef1v2FypexQJN3D\n" +
             "Meeting ID: 251 659 872 407 654\n" +
-            "Passcode: TA6QM9KL\n" +
-            "You can also send only the link, or: join 251 659 872 407 654 TA6QM9KL";
+            "Passcode: TA6QM9KL";
     }
 }
