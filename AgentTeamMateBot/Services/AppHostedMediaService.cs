@@ -206,6 +206,21 @@ public class AppHostedMediaService
 
     public async Task<ICall> JoinMeetingAsync(string meetingId, string? passcode)
     {
+        var mediaPort = _configuration.GetValue("Media:InternalPort", 8445);
+        if (!IsTcpPortListening(mediaPort))
+        {
+            BotLog.Info("[HEALTH] Media port 8445 is not ready.");
+            TryInitialize();
+            await Task.Delay(3000);
+
+            if (!IsTcpPortListening(mediaPort))
+            {
+                BotLog.Info("[HEALTH] Media port 8445 is still not ready. Join will not be attempted.");
+                throw new InvalidOperationException(
+                    "Media unavailable: TCP port 8445 is not listening.");
+            }
+        }
+
         if (!_initialized || !_mediaPlatformReady || _client == null)
         {
             TryInitialize();
@@ -1286,6 +1301,23 @@ public class AppHostedMediaService
         }
 
         return new string(meetingId.Where(char.IsDigit).ToArray());
+    }
+
+    private static bool IsTcpPortListening(int port)
+    {
+        var listeners = IPGlobalProperties
+            .GetIPGlobalProperties()
+            .GetActiveTcpListeners();
+
+        for (var i = 0; i < listeners.Length; i++)
+        {
+            if (listeners[i].Port == port)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private sealed class AudioSocketBinding
